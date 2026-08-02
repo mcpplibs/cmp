@@ -53,6 +53,3 @@ jobs:
         run: |
           cd examples/basic
           mcpp run
-
-      - name: Smoke-test templates/
-        run: bash tools/template_smoke.sh

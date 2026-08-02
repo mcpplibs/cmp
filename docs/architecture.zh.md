@@ -1,146 +1,139 @@
-# 架构文档
+# 架构
 
-> 一个最小 mcpp C++23 模块库模板。
-> [English](architecture.md) · [简体中文](architecture.zh.md) · [繁體中文](architecture.zh.hant.md)
+[English](architecture.md) · **简体中文** · [繁體中文](architecture.zh.hant.md)
 
-## 目标
+## 当前状态
 
-仓库只表达四件事：
+CMP 目前是一个初始的 C++23 模块项目。包可以构建和导入，但根模块还没有公共声明，
+协程运行时也尚未实现。
 
-- 用 `.xlings.json` 声明项目工具环境（用哪个 mcpp 版本构建）。
-- 用 `mcpp.toml` 声明 C++23 模块库和测试依赖；运行时依赖按需添加。
-- 用 `templates/` 声明这个库对外分发的项目模板。
-- 用 `mcpp build`、`mcpp test`、`mcpp run` 验证库、单元测试和示例。
+仓库现有内容包括：
 
-## mcpp 约定
+- 一份 mcpp 包清单；
+- 仅包含模块声明的根模块 `mcpplibs.cmp`；
+- 一个 gtest 导入测试；
+- 一个通过路径依赖使用根包的独立示例；
+- Linux、macOS 和 Windows 三套 CI 工作流。
 
-- 默认扫描 `src/**/*.{cppm,cpp,cc,c,S,s,asm}`。
-- 只有 `src/*.cppm` 且没有 `src/main.cpp` 时，mcpp 会推断出以包名命名的 **lib** 目标
-  （`Inferred target mylib (lib from .cppm in src/)`）。需要覆盖默认行为时再显式写
-  `[targets.<name>]`。
-- 库根模块默认放在 `src/<包名最后一段>.cppm`；`[lib] path` 可以改这个位置。
-- 依赖放 `[dependencies]` 或 `[dependencies.<namespace>]`；只在测试用的放
-  `[dev-dependencies]`（`mcpp build` 不解析它们，只有 `mcpp test` 会）。
-- 单元测试放 `tests/**/*.cpp`，由 `mcpp test` 自动发现，一个文件一个测试二进制。
-  测试文件只写 `TEST(...)`，不定义自己的 `main()`。
-- 默认构建 profile 是 `dev`（`-O0 -g`）；`mcpp build --release` 才是优化构建。
-  C++ 标准默认 `c++23`，应写在 `[package] standard`，不要写进 `cxxflags`。
-- `mcpp.lock` 不入库：这是一个库，真正起作用的是使用方的版本解析。
-  从 `templates/` 生成的应用则可以考虑提交自己的锁文件。
-
-## 当前结构
-
-```text
-.
-├── .xlings.json
-├── mcpp.toml
-├── src/mylib.cppm
-├── tests/mylib_test.cpp
-├── examples/basic/
-│   ├── mcpp.toml
-│   └── src/main.cpp
-├── templates/
-│   ├── basic/                # 默认模板：控制台程序
-│   │   ├── template.toml
-│   │   ├── mcpp.toml.in
-│   │   ├── src/main.cpp.in
-│   │   └── .gitignore
-│   └── lib/                  # 下游模块库 + gtest
-│       ├── template.toml
-│       ├── mcpp.toml.in
-│       ├── src/lib.cppm.in
-│       └── tests/lib_test.cpp.in
-├── tools/template_smoke.sh
-└── .github/workflows/{ci-linux,ci-macos,ci-windows}.yml
-```
-
-## 根包
+## 包和模块标识
 
 ```toml
 [package]
-namespace = "mcpplibs"
-name      = "mylib"
-version   = "0.1.0"
-
-[dev-dependencies]
-gtest = "1.15.2"
+namespace   = "mcpplibs"
+name        = "cmp"
+version     = "0.1.0"
+standard    = "c++23"
+description = "A C++23 coroutine runtime project built with mcpp and C++ Modules"
+license     = "Apache-2.0"
+repo        = "https://github.com/mcpplibs/cmp"
 ```
 
-每个包的身份由两部分组成：**namespace** 和 **name**。`namespace = "mcpplibs"` 加
-`name = "mylib"` 意味着使用方在 `[dependencies.mcpplibs]` 下写 `mylib = "0.1.0"`
-（也可以直接写裸名 —— `mcpplibs` 是 mcpp 优先搜索的默认命名空间）。
+mcpp 包由 `mcpplibs` 和 `cmp` 共同标识。使用方在 `[dependencies.mcpplibs]` 中声明
+`cmp`，在 C++ 源码中导入 `mcpplibs.cmp`。`mcpplibs::cmp` 留作以后公共 C++ 声明
+使用。
 
-`src/mylib.cppm` 导出模块 `mcpplibs.mylib`，并且不重新导出任何东西：依赖在用到的地方
-import，而不是通过根模块转发出去，除非公开 API 确实暴露了依赖包的类型。
+根模块接口位于 `src/cmp.cppm`，符合 mcpp 默认的库根模块命名规则。仓库中没有
+`src/main.cpp`，因此 mcpp 会推断出名为 `cmp` 的库目标，不需要额外配置 `[lib]` 或
+`[targets.cmp]`。虽然 C++23 也是 mcpp 的默认标准，清单中仍然明确写出这一基线。
 
-## 添加依赖
+`gtest = "1.15.2"` 是测试使用的开发依赖。CMP 当前不跟踪 `mcpp.lock`，该文件由
+`.gitignore` 排除。
 
-在根 `mcpp.toml` 添加依赖声明：
+## 仓库结构
+
+```text
+.
+├── .github/workflows/
+│   ├── ci-linux.yml
+│   ├── ci-macos.yml
+│   └── ci-windows.yml
+├── .xlings.json
+├── docs/
+│   ├── architecture.md
+│   ├── architecture.zh.md
+│   └── architecture.zh.hant.md
+├── examples/basic/
+│   ├── mcpp.toml
+│   └── src/main.cpp
+├── src/cmp.cppm
+├── tests/cmp_test.cpp
+└── mcpp.toml
+```
+
+## 构建与测试
+
+`.xlings.json` 固定项目使用的 mcpp 版本。`mcpp build` 构建自动推断的库目标。
+`mcpp test` 发现 `tests/cmp_test.cpp`，链接 gtest 入口，并验证另一个翻译单元可以导入
+`mcpplibs.cmp`。
+
+三套 CI 工作流都会安装项目工具、构建库、运行测试并执行 `examples/basic`。不同操作系统
+的工具安装和运行环境不同，因此分别保留工作流文件。
+
+CMP 当前不随包发布供 `mcpp new` 使用的项目模板。原脚手架中的 `basic` 和 `lib` 是通用
+发布模板，并不反映 CMP 的实际用法。删除这些模板后，`tools/template_smoke.sh` 已经没有
+可渲染和编译的对象，因此连同对应的 CI 步骤一起删除。`examples/basic` 继续保留，用来直接
+验证包的使用方式。
+
+`.gitignore` 排除 mcpp 生成物、编译数据库、项目工具环境、编译器和编辑器缓存，以及仓库内
+的本地项目状态。这些内容由工具生成或只在本机使用，不属于发布包。
+
+## 独立示例
+
+`examples/basic` 有自己的清单，并通过路径依赖引用仓库根目录：
 
 ```toml
+[package]
+name     = "cmp-basic"
+standard = "c++23"
+
 [dependencies.mcpplibs]
-cmdline = "0.0.2"
+cmp = { path = "../.." }
 ```
 
-在需要的位置导入：
+示例程序使用与外部项目相同的导入路径：
 
 ```cpp
-import mcpplibs.cmdline;
+import mcpplibs.cmp;
+
+int main() {
+    return 0;
+}
 ```
 
-默认不用 `export import`。只有当公开 API 直接交出依赖包的类型时，才考虑重新导出。
+该示例在根测试目标之外，单独检查路径依赖解析和模块使用。
 
-## 示例包
+## 当前边界
 
-`examples/basic` 是独立的 mcpp 包，通过 path 依赖引用根库：
+根模块目前没有提供 `task`、promise 类型、调度器、定时器、取消机制、异步 I/O 后端或
+阻塞任务线程池，也没有保留旧脚手架模块的兼容别名。
 
-```toml
-[dependencies.mcpplibs]
-mylib = { path = "../.." }
-```
+CMP 名称中的 `C` 与 Go 运行时中的 `G` 相呼应，但这只说明命名来源，不表示两者语义等价。
+标准 C++ 协程提供挂起和恢复机制，本身不包含调度器，也不会把阻塞操作自动变成异步操作。
 
-运行：
+## 可选的后续工作
 
-```bash
+以下方向可以分别设计和评审，目前都不是包的既有约定：
+
+1. 协程任务的所有权、完成和生命周期规则；
+2. 单线程调度器和显式调度 awaiter；
+3. 定时器、唤醒路径和取消；
+4. 多工作线程调度和工作窃取；
+5. 异步 I/O 集成；
+6. 处理不可避免的阻塞工作的专用线程池。
+
+只有已实现的 API 确实需要新的边界时，才增加模块分区或实现单元。
+
+## 验证
+
+在仓库根目录执行：
+
+```text
+mcpp build --cache=off
+mcpp test --cache=off
 cd examples/basic
 mcpp run
 ```
 
-它的意义在于**从外部**证明这个库可用 —— 有自己的清单、走自己的依赖解析，这是从 `tests/`
-里 import 验证不了的。
-
-## 模板
-
-`templates/<name>/` 是库把项目脚手架分发给使用方的方式：`mcpp new myapp --template mylib`
-会把模板渲染成一个新项目，而且模板版本自动跟随库版本。
-
-- `template.toml` —— `description`，所有模板中最多一个 `default = true`，以及可选的
-  `post_message`（生成后打印）。它只是元数据，不会被拷贝。
-- `*.in` —— 渲染后去掉后缀。占位符：`{{project.name}}`、`{{self.name}}`、`{{self.version}}`。
-- 其他文件 —— 原样拷贝。
-
-模板是纯数据：mcpp 只做渲染和拷贝，不执行任何钩子或脚本。**文件名不参与渲染**，只有文件内容
-参与 —— 所以 `lib` 模板固定提供 `src/lib.cppm` 并用 `[lib] path` 指过去，而不是依赖
-`src/<包名>.cppm` 的默认约定。
-
-如果渲染出来的 `mcpp.toml` 没有声明对分发库的依赖，mcpp 会自动注入一条；本仓库的模板已经用
-`{{self.version}}` 显式写了，所以不会触发注入。
-
-`tools/template_smoke.sh` 会按 `mcpp new` 的方式渲染每个模板，把依赖改指向当前仓库
-（这样在库还没发布到索引时就能校验模板），然后编译；模板生成的是可执行程序时还会运行它。
-
-## CI
-
-三个 workflow，每个平台一个（`.github/workflows/ci-{linux,macos,windows}.yml`），
-都走新用户会走的同一条路径：
-
-```bash
-xlings install -y        # 按 .xlings.json 的固定版本安装项目环境的 mcpp
-mcpp build
-mcpp test
-cd examples/basic && mcpp run
-bash tools/template_smoke.sh
-```
-
-按平台拆分让每个操作系统各有一个徽章和一份日志，macOS 或 Windows 上的回归就不会被
-Linux 的绿灯掩盖。
+预期结果是库构建成功、一个导入测试通过，并且示例以状态 0 退出。当前 Windows LLVM
+工具链不会生成 GNU depfile；如果模块接口包含的文件发生变化，增量构建可能复用旧的 BMI
+或目标文件。完整复验时使用 `--cache=off`。

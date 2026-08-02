@@ -1,8 +1,9 @@
 [package]
-name        = "mylib-basic"
+name        = "cmp-basic"
 version     = "0.1.0"
-description = "Basic consumer for the mcpplibs.mylib module"
+standard    = "c++23"
+description = "Basic consumer for the mcpplibs.cmp module"
 license     = "Apache-2.0"
 
 [dependencies.mcpplibs]
-mylib = { path = "../.." }
+cmp = { path = "../.." }

@@ -27,16 +27,14 @@ docs, and actual command output.
 
 ## This Repository
 
-- `README.md` (`README.zh.md`, `README.zh.hant.md`) — entry point, quick start, agent prompt, links.
-- `docs/architecture.md` (`.zh.md`, `.zh.hant.md`) — structure, mcpp conventions, dependencies, templates, CI.
+- `README.md` (`README.zh.md`, `README.zh.hant.md`) — entry point, current status, boundaries, roadmap, links.
+- `docs/architecture.md` (`.zh.md`, `.zh.hant.md`) — current structure, mcpp conventions, runtime boundaries, CI.
 - `.xlings.json` — the project tool environment (which mcpp version builds this).
 - `mcpp.toml` — package metadata, dependencies, dev-dependencies.
-- `src/mylib.cppm` — the library module interface.
-- `tests/mylib_test.cpp` — a gtest suite matching the `mcpp test` conventions.
-- `examples/basic/` — a standalone consumer package.
-- `templates/` — project templates shipped with the library (`basic`, `lib`).
-- `tools/template_smoke.sh` — renders and builds every template against this checkout.
-- `.github/workflows/ci-{linux,macos,windows}.yml` — per-platform CI.
+- `src/cmp.cppm` — the import-only CMP root module interface.
+- `tests/cmp_test.cpp` — the gtest import smoke test.
+- `examples/basic/` — a standalone path-dependency consumer.
+- `.github/workflows/ci-{linux,macos,windows}.yml` — per-platform build, test, and example CI.
 
 ## Upstream
 
@@ -57,7 +55,7 @@ Use these to confirm:
 
 - Package index: https://github.com/mcpplibs/mcpp-index · https://mcpplibs.github.io/mcpp-index/
 - mcpplibs organization: https://github.com/mcpplibs
-- Reference library — small and close to this template: https://github.com/mcpplibs/cmdline
+- Reference library — small, with a package/module layout close to CMP's current baseline: https://github.com/mcpplibs/cmdline
 - Reference library — templates, i18n, multi-module: https://github.com/mcpplibs/llmapi
 
 Check the index before adding a dependency; read `cmdline`/`llmapi` when you want to see how a
@@ -76,7 +74,7 @@ public API, and tests without a custom `main()`.
 
 - xlings: https://github.com/openxlings/xlings
 
-This template pins its tools in `.xlings.json`. After entering the repository:
+This project pins its tools in `.xlings.json`. After entering the repository:
 
 ```bash
 xlings install         # installs mcpp into the PROJECT environment (xlings install mcpp -g for global)
@@ -85,11 +83,10 @@ mcpp --version
 
 ## Common Tasks
 
-- **Understand the template** → `README.md` and `docs/architecture.md`.
+- **Understand CMP's current baseline** → `README.md` and `docs/architecture.md`.
 - **Confirm an `mcpp.toml` field** → `mcpp.toml`, the [`mcpp`](../mcpp/SKILL.md) skill, then upstream `docs/05-mcpp-toml.md`.
 - **Add a dependency** → the [`mcpp-index`](../mcpp-index/SKILL.md) skill, then `mcpplibs/cmdline` for a real example.
 - **Add a module API** → `mcpp-style-ref`, then edit `src/*.cppm`.
-- **Add a test** → follow `tests/mylib_test.cpp`, verify with `mcpp test`.
+- **Add a test** → follow `tests/cmp_test.cpp`, verify with `mcpp test`.
 - **Add an example** → follow `examples/basic/` — its own `mcpp.toml` with a path dependency.
-- **Add or change a template** → `templates/<name>/`, verify with `bash tools/template_smoke.sh`.
 - **Publish the library** → the [`mcpp-index`](../mcpp-index/SKILL.md) skill.

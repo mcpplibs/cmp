@@ -143,14 +143,14 @@ mcpp --version
 
 > xlings详细信息可参考 [xlings](https://github.com/openxlings/xlings) 文档。
 
-## 示例项目创建
+## 当前项目结构
 
 参考本仓库 `src/` 目录结构：
 
 - `.xlings.json`：声明项目工具环境
 - `mcpp.toml`：声明 `[package]` 与测试依赖；简单库目标可由 mcpp 从 `src/*.cppm` 自动推断
-- `src/mylib.cppm`：库主模块接口，默认 `export module mcpplibs.mylib;`
-- `tests/mylib_test.cpp`：`mcpp test` 自动发现的 gtest 测试；不要定义 `main()`
+- `src/cmp.cppm`：库主模块接口，声明 `export module mcpplibs.cmp;`
+- `tests/cmp_test.cpp`：`mcpp test` 自动发现的 gtest 导入测试；不要定义 `main()`
 - `examples/basic/`：独立 mcpp consumer 包，通过 path 依赖引用根库
 
 构建：

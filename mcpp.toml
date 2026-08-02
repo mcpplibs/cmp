@@ -1,11 +1,12 @@
 [package]
 namespace   = "mcpplibs"
-name        = "mylib"
+name        = "cmp"
 version     = "0.1.0"
-description = "A small C++23 module library scaffold for mcpplibs"
+standard    = "c++23"
+description = "A C++23 coroutine runtime project built with mcpp and C++ Modules"
 license     = "Apache-2.0"
 authors     = ["mcpplibs"]
-repo        = "https://github.com/mcpplibs/mylib"
+repo        = "https://github.com/mcpplibs/cmp"
 
 [dev-dependencies]
 gtest = "1.15.2"

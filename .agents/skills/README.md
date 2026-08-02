@@ -1,7 +1,7 @@
-# mcpplibs template — Agent Skills
+# CMP — Agent Skills
 
-Skills that help an agent understand this mcpp/mcpplibs module-library template, look things up
-upstream, and follow the mcpp-style-ref rules when writing or reviewing Modern/Module C++.
+Skills that help an agent understand the CMP mcpp/C++23 module project, look things up upstream,
+and follow the mcpp-style-ref rules when writing or reviewing Modern/Module C++.
 
 ## Available Skills
 
@@ -30,7 +30,7 @@ done
 Or install them as personal skills:
 
 ```bash
-ln -s /path/to/mcpp-template/.agents/skills/mcpp ~/.cursor/skills/mcpp
+ln -s /path/to/cmp/.agents/skills/mcpp ~/.cursor/skills/mcpp
 ```
 
 Claude Code and other agents that read `.agents/skills/` pick them up from this directory

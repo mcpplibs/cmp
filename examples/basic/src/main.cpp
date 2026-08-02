@@ -1,7 +1,5 @@
-import std;
-import mcpplibs.mylib;
+import mcpplibs.cmp;
 
 int main() {
-    std::println("{}", mcpplibs::mylib::hello_mcpplibs());
     return 0;
 }

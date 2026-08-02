@@ -7,6 +7,12 @@ compile_commands.json
 # xlings project environment
 .xlings/
 
+# Local tools and editor state
+.cache/
+/.clice/
+/.rpiv/
+/.vscode/
+
 # Compiled Object files
 *.slo
 *.lo

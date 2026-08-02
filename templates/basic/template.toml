@@ -1,4 +1,0 @@
-[template]
-description  = "Minimal console app that imports the library"
-default      = true
-post_message = "Next: cd into the project, then `mcpp run` (or `mcpp build`)."

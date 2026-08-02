@@ -1,8 +1,7 @@
 name: ci-linux
 
-# Linux CI — the same path a user walks after `Use this template`:
-#   xlings install (project env, pinned by .xlings.json) → build → test →
-#   example → templates/ smoke.
+# Linux CI — the same path a contributor walks:
+#   xlings install (project env, pinned by .xlings.json) → build → test → example.
 #
 # Split per OS on purpose (ci-macos.yml / ci-windows.yml are the same flow):
 # one badge and one log per platform, and a macOS/Windows toolchain problem
@@ -62,6 +61,3 @@ jobs:
         run: |
           cd examples/basic
           mcpp run
-
-      - name: Smoke-test templates/
-        run: bash tools/template_smoke.sh

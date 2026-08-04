@@ -16,7 +16,8 @@
 [![ci-windows](https://github.com/mcpplibs/cmp/actions/workflows/ci-windows.yml/badge.svg?branch=main)](https://github.com/mcpplibs/cmp/actions/workflows/ci-windows.yml)
 
 > [!IMPORTANT]
-> CMP 当前处于 **bootstrap 阶段**。包已经导出根模块 `mcpplibs.cmp`，但尚未提供协程运行时 API。
+> CMP 已经提供第一个协程基础类型：懒启动、单消费者的 `Task<T>` / `Task<void>`。
+> 调度、取消、定时器、异步 I/O 和公共根任务驱动器尚未实现。
 
 CMP 计划基于标准无栈 C++ 协程构建现代协程运行时和库。项目将以显式 `co_await` 为主线，
 通过经过验证的小步骤逐步探索调度、定时器、异步 I/O、取消以及阻塞工作的安全隔离。
@@ -66,20 +67,39 @@ cd examples/basic
 mcpp run
 ```
 
-示例会以成功状态退出且不产生输出。它只负责证明独立 mcpp 包能够解析路径依赖并导入
-`mcpplibs.cmp`。
+示例会从 `Task<void>` 协程内部打印 `Coroutine result: 42`，然后以成功状态退出。它负责
+证明独立 mcpp 包能够解析路径依赖、导入 `mcpplibs.cmp`、组合 Task 并执行同步协程链。
 
-## 当前模块
+## 当前 Task API
 
 ```cpp
+import std;
 import mcpplibs.cmp;
 
-int main() {
-    return 0;
+using mcpplibs::cmp::Task;
+
+Task<int> answer() {
+    co_return 42;
+}
+
+Task<void> print_answer() {
+    auto value = co_await answer();
+    std::println("Coroutine result: {}", value);
+    co_return;
 }
 ```
 
-bootstrap 阶段的模块刻意不包含公开声明。未来公共 API 将使用 `mcpplibs::cmp` 命名空间。
+`Task` 采用懒启动：调用 `answer()` 只创建处于挂起状态的协程，在被 `co_await` 消费时才
+开始执行。Task 只能移动、只有一个消费者且只能作为右值等待；它保存值或异常，在子协程与
+continuation 之间直接转移，并通过 RAII 销毁未消费的协程帧。当前刻意不支持 `Task<T&>`、
+复制、移动赋值和 detached 执行。
+
+定义协程的翻译单元必须导入 `std`，使编译器能够看到标准协程协议类型。CMP 私有导入
+`std`，不会向使用方重新导出整个标准库。
+
+CMP 尚未提供 `sync_wait` 或调度器，因此当前 API 是协程组合基础，而不是完整的应用入口。
+独立示例因此定义了一个很小的私有根协程，只适用于其中同步完成的协程链。已经被移动的
+Task 不得再次等待。
 
 ## 仓库结构
 
@@ -88,7 +108,7 @@ bootstrap 阶段的模块刻意不包含公开声明。未来公共 API 将使�
 ├── .xlings.json              # 固定的项目工具环境
 ├── mcpp.toml                 # 包身份和测试依赖
 ├── src/cmp.cppm              # 根模块接口
-├── tests/cmp_test.cpp        # 导入 smoke 测试
+├── tests/cmp_test.cpp        # Task 契约和生命周期测试
 ├── examples/basic/           # 独立的路径依赖 consumer
 ├── docs/architecture.zh.md   # 当前结构、边界和演进方向
 └── .github/workflows/        # Linux、macOS 和 Windows CI
@@ -114,16 +134,16 @@ CMP 当前不跟踪 `mcpp.lock`，`.gitignore` 明确执行这一仓库约定。
 
 ## 路线图
 
-运行时工作将拆分为可以独立审查的阶段：
+运行时工作拆分为可以独立审查的阶段：
 
-1. 包身份和可导入模块 bootstrap；
-2. 协程 task 与生命周期语义；
+1. 包身份和可导入模块 bootstrap——已完成；
+2. 协程 task 与生命周期语义——已实现初始 `Task`；
 3. 最小单线程调度器；
 4. 定时器、取消和结构化唤醒路径；
 5. 多 worker 调度与 work stealing；
 6. 异步 I/O 集成和 blocking pool。
 
-bootstrap 之后的顺序只是方向，不代表这些能力已经实现。
+剩余顺序只是方向，不代表列出的能力已经实现。
 
 ## 参与贡献
 

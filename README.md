@@ -16,8 +16,8 @@
 [![ci-windows](https://github.com/mcpplibs/cmp/actions/workflows/ci-windows.yml/badge.svg?branch=main)](https://github.com/mcpplibs/cmp/actions/workflows/ci-windows.yml)
 
 > [!IMPORTANT]
-> CMP is currently in its **bootstrap stage**. The package exports the root module
-> `mcpplibs.cmp`, but it does not provide coroutine runtime APIs yet.
+> CMP now provides its first coroutine primitive: a lazy, single-consumer `Task<T>` / `Task<void>`.
+> Scheduling, cancellation, timers, asynchronous I/O, and a public root runner are not implemented.
 
 CMP is being built as a modern coroutine runtime and library on standard stackless C++
 coroutines. The intended direction is an explicit `co_await` model that can grow, in small
@@ -71,21 +71,43 @@ cd examples/basic
 mcpp run
 ```
 
-The example exits successfully without output. Its purpose is to prove that an independent mcpp
-package can resolve the path dependency and import `mcpplibs.cmp`.
+The example prints `Coroutine result: 42` from inside a `Task<void>` coroutine and exits
+successfully. It proves that an independent mcpp package can resolve the path dependency, import
+`mcpplibs.cmp`, compose Tasks, and execute the synchronous chain.
 
-## Current Module
+## Current Task API
 
 ```cpp
+import std;
 import mcpplibs.cmp;
 
-int main() {
-    return 0;
+using mcpplibs::cmp::Task;
+
+Task<int> answer() {
+    co_return 42;
+}
+
+Task<void> print_answer() {
+    auto value = co_await answer();
+    std::println("Coroutine result: {}", value);
+    co_return;
 }
 ```
 
-The module deliberately has no public declarations during bootstrap. Future public APIs will use
-the namespace `mcpplibs::cmp`.
+`Task` is lazy: calling `answer()` creates a suspended coroutine. It starts when consumed by
+`co_await`. A Task is move-only, has one consumer, and can only be awaited as an rvalue. It stores
+either a value or an exception, transfers directly between child and continuation, and destroys
+an unconsumed frame through RAII. `Task<T&>`, copying, move assignment, and detached execution are
+deliberately unsupported.
+
+A translation unit that defines a coroutine must import `std` so the compiler can see the standard
+coroutine protocol types. CMP imports `std` privately and does not re-export the whole standard
+library.
+
+CMP does not yet provide `sync_wait` or a scheduler, so the current API is a composition primitive
+rather than a complete application entry point. The standalone example therefore defines a small,
+private root coroutine that is suitable only for its synchronously completing chain. A moved-from
+Task must not be awaited.
 
 ## Repository Layout
 
@@ -94,7 +116,7 @@ the namespace `mcpplibs::cmp`.
 ├── .xlings.json              # pinned project tool environment
 ├── mcpp.toml                 # package identity and test dependency
 ├── src/cmp.cppm              # root module interface
-├── tests/cmp_test.cpp        # import smoke test
+├── tests/cmp_test.cpp        # Task contract and lifetime tests
 ├── examples/basic/           # standalone path-dependency consumer
 ├── docs/architecture.md      # current structure, boundaries, and evolution
 └── .github/workflows/        # Linux, macOS, and Windows CI
@@ -122,17 +144,16 @@ belong in `[dependencies]`; test-only dependencies belong in `[dev-dependencies]
 
 ## Roadmap
 
-Runtime work will be split into independently reviewable phases:
+Runtime work is split into independently reviewable phases:
 
-1. package identity and importable-module bootstrap;
-2. coroutine task and lifetime semantics;
+1. package identity and importable-module bootstrap — implemented;
+2. coroutine task and lifetime semantics — initial `Task` implemented;
 3. a minimal single-thread scheduler;
 4. timers, cancellation, and structured wake-up paths;
 5. multi-worker scheduling and work stealing;
 6. asynchronous I/O integration and a blocking pool.
 
-The order after the bootstrap is directional, not a promise that any listed feature is already
-implemented.
+The remaining order is directional, not a promise that a listed feature is already implemented.
 
 ## Contributing
 

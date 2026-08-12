@@ -29,13 +29,10 @@ mcpp index list|add|remove|update   # manage registries
 Package identity is a pair: **`namespace` is a dotted hierarchical path, `name` is a single
 atomic segment** (`compat` + `zlib`, `mcpplibs.capi` + `lua` — never `mcpplibs` + `capi.lua`).
 
-A **bare** dependency name resolves in exactly three places, in order:
-
-1. `mcpplibs` — the default namespace
-2. `compat` — third-party C/C++ wrappers
-3. packages that declare no namespace at all
-
-Anything else must be spelled out — there is no index-wide fuzzy search by short name:
+A **bare** dependency name means the `mcpplibs` default namespace. The older fallback search
+through `compat` and packages without a namespace is deprecated in mcpp 2026.8 and removed in
+2026.9. Every other namespace must be spelled out; there is no index-wide fuzzy search by short
+name:
 
 ```toml
 [dependencies]
@@ -43,12 +40,14 @@ Anything else must be spelled out — there is no index-wide fuzzy search by sho
 
 [dependencies.chriskohlhoff]        # or a namespace sub-table
 asio = "1.38.1"
+
+[dependencies.compat]               # third-party wrapper
+zlib = "1.3.1"
 ```
 
-When resolution fails: read the error (it lists the namespaces searched), then check the
-spelling against the online index, and run `xlings update` — a release tarball bundles an
-index snapshot frozen at build time, which is the usual reason a fresh version "does not
-exist".
+When resolution fails: read the error, check the exact namespace and spelling against the online
+index, and run `xlings update` — a release tarball bundles an index snapshot frozen at build time,
+which is the usual reason a fresh version "does not exist".
 
 Mirrors: `mcpp self config --mirror CN` switches to the GitCode mirror; `GLOBAL` (upstream) is
 the default.

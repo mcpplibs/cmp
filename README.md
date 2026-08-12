@@ -16,8 +16,9 @@
 [![ci-windows](https://github.com/mcpplibs/cmp/actions/workflows/ci-windows.yml/badge.svg?branch=main)](https://github.com/mcpplibs/cmp/actions/workflows/ci-windows.yml)
 
 > [!IMPORTANT]
-> CMP now provides its first coroutine primitive: a lazy, single-consumer `Task<T>` / `Task<void>`.
-> Scheduling, cancellation, timers, asynchronous I/O, and a public root runner are not implemented.
+> CMP provides a lazy, single-consumer `Task<T>` / `Task<void>` and a caller-thread `RunLoop`
+> with explicit scheduling. Cancellation, timers, asynchronous I/O, and detached execution are
+> not implemented.
 
 CMP is being built as a modern coroutine runtime and library on standard stackless C++
 coroutines. The intended direction is an explicit `co_await` model that can grow, in small
@@ -71,26 +72,33 @@ cd examples/basic
 mcpp run
 ```
 
-The example prints `Coroutine result: 42` from inside a `Task<void>` coroutine and exits
+The example prints `Coroutine result: 42` from inside a scheduled `Task<void>` coroutine and exits
 successfully. It proves that an independent mcpp package can resolve the path dependency, import
-`mcpplibs.cmp`, compose Tasks, and execute the synchronous chain.
+`mcpplibs.cmp`, compose Tasks, and drive them through the public RunLoop.
 
-## Current Task API
+## Current API
 
 ```cpp
 import std;
 import mcpplibs.cmp;
 
 using mcpplibs::cmp::Task;
+using mcpplibs::cmp::RunLoop;
 
 Task<int> answer() {
     co_return 42;
 }
 
-Task<void> print_answer() {
+Task<void> print_answer(RunLoop::Scheduler scheduler) {
+    co_await scheduler.schedule();
     auto value = co_await answer();
     std::println("Coroutine result: {}", value);
     co_return;
+}
+
+int main() {
+    RunLoop loop {};
+    loop.run(print_answer(loop.get_scheduler()));
 }
 ```
 
@@ -104,10 +112,16 @@ A translation unit that defines a coroutine must import `std` so the compiler ca
 coroutine protocol types. CMP imports `std` privately and does not re-export the whole standard
 library.
 
-CMP does not yet provide `sync_wait` or a scheduler, so the current API is a composition primitive
-rather than a complete application entry point. The standalone example therefore defines a small,
-private root coroutine that is suitable only for its synchronously completing chain. A moved-from
-Task must not be awaited.
+`RunLoop::run()` consumes one root Task, executes ready coroutines on the calling thread, returns
+its value, and rethrows its exception. `Scheduler::schedule()` always suspends and queues the
+continuation. Scheduler handles are copyable, but remain tied to their originating RunLoop.
+Sequential `run()` calls are supported; nested or concurrent calls are rejected. A moved-from Task
+must not be awaited.
+
+RunLoop is not a background thread and does not make blocking code asynchronous. A Task that
+suspends without arranging a future resume can leave `run()` waiting indefinitely. CMP does not
+provide automatic thread affinity: after an external awaiter resumes on another thread, explicitly
+await the desired Scheduler to return to its RunLoop.
 
 ## Repository Layout
 
@@ -116,7 +130,10 @@ Task must not be awaited.
 ├── .xlings.json              # pinned project tool environment
 ├── mcpp.toml                 # package identity and test dependency
 ├── src/cmp.cppm              # root module interface
+├── src/task.cppm             # Task module partition
+├── src/run_loop.cppm         # RunLoop and Scheduler partition
 ├── tests/cmp_test.cpp        # Task contract and lifetime tests
+├── tests/run_loop_test.cpp   # scheduler, boundary, and threading tests
 ├── examples/basic/           # standalone path-dependency consumer
 ├── docs/architecture.md      # current structure, boundaries, and evolution
 └── .github/workflows/        # Linux, macOS, and Windows CI
@@ -140,7 +157,7 @@ The mcpp version is pinned by `.xlings.json`; contributors should not rely on an
 global mcpp installation.
 
 CMP does not track `mcpp.lock`; `.gitignore` enforces that repository policy. Runtime dependencies
-belong in `[dependencies]`; test-only dependencies belong in `[dev-dependencies]`.
+belong in `[dependencies]`; gtest is declared explicitly under `[dev-dependencies.compat]`.
 
 ## Roadmap
 
@@ -148,7 +165,7 @@ Runtime work is split into independently reviewable phases:
 
 1. package identity and importable-module bootstrap — implemented;
 2. coroutine task and lifetime semantics — initial `Task` implemented;
-3. a minimal single-thread scheduler;
+3. a root runner and minimal single-thread scheduler — initially implemented;
 4. timers, cancellation, and structured wake-up paths;
 5. multi-worker scheduling and work stealing;
 6. asynchronous I/O integration and a blocking pool.

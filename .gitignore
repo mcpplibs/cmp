@@ -10,6 +10,7 @@ compile_commands.json
 # Local tools and editor state
 .cache/
 /.clice/
+/.idea/
 /.rpiv/
 /.vscode/
 

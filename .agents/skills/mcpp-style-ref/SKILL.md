@@ -149,8 +149,10 @@ mcpp --version
 
 - `.xlings.json`：声明项目工具环境
 - `mcpp.toml`：声明 `[package]` 与测试依赖；简单库目标可由 mcpp 从 `src/*.cppm` 自动推断
-- `src/cmp.cppm`：库主模块接口，声明 `export module mcpplibs.cmp;`
-- `tests/cmp_test.cpp`：`mcpp test` 自动发现的 gtest 导入测试；不要定义 `main()`
+- `src/cmp.cppm`：库主模块接口，导出 `:task` 与 `:run_loop` 分区
+- `src/task.cppm`：`Task<T>` 与 `Task<void>` 分区
+- `src/run_loop.cppm`：`RunLoop` 与 `Scheduler` 分区
+- `tests/cmp_test.cpp`、`tests/run_loop_test.cpp`：`mcpp test` 自动发现的 gtest 测试；不要定义 `main()`
 - `examples/basic/`：独立 mcpp consumer 包，通过 path 依赖引用根库
 
 构建：

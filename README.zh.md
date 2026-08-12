@@ -16,8 +16,8 @@
 [![ci-windows](https://github.com/mcpplibs/cmp/actions/workflows/ci-windows.yml/badge.svg?branch=main)](https://github.com/mcpplibs/cmp/actions/workflows/ci-windows.yml)
 
 > [!IMPORTANT]
-> CMP 已经提供第一个协程基础类型：懒启动、单消费者的 `Task<T>` / `Task<void>`。
-> 调度、取消、定时器、异步 I/O 和公共根任务驱动器尚未实现。
+> CMP 已提供懒启动、单消费者的 `Task<T>` / `Task<void>`，以及在调用线程运行、支持显式
+> 调度的 `RunLoop`。取消、定时器、异步 I/O 和 detached 执行尚未实现。
 
 CMP 计划基于标准无栈 C++ 协程构建现代协程运行时和库。项目将以显式 `co_await` 为主线，
 通过经过验证的小步骤逐步探索调度、定时器、异步 I/O、取消以及阻塞工作的安全隔离。
@@ -67,25 +67,33 @@ cd examples/basic
 mcpp run
 ```
 
-示例会从 `Task<void>` 协程内部打印 `Coroutine result: 42`，然后以成功状态退出。它负责
-证明独立 mcpp 包能够解析路径依赖、导入 `mcpplibs.cmp`、组合 Task 并执行同步协程链。
+示例会从经过调度的 `Task<void>` 协程内部打印 `Coroutine result: 42`，然后以成功状态退出。
+它负责证明独立 mcpp 包能够解析路径依赖、导入 `mcpplibs.cmp`、组合 Task 并通过公共
+RunLoop 驱动任务。
 
-## 当前 Task API
+## 当前 API
 
 ```cpp
 import std;
 import mcpplibs.cmp;
 
 using mcpplibs::cmp::Task;
+using mcpplibs::cmp::RunLoop;
 
 Task<int> answer() {
     co_return 42;
 }
 
-Task<void> print_answer() {
+Task<void> print_answer(RunLoop::Scheduler scheduler) {
+    co_await scheduler.schedule();
     auto value = co_await answer();
     std::println("Coroutine result: {}", value);
     co_return;
+}
+
+int main() {
+    RunLoop loop {};
+    loop.run(print_answer(loop.get_scheduler()));
 }
 ```
 
@@ -97,9 +105,14 @@ continuation 之间直接转移，并通过 RAII 销毁未消费的协程帧。�
 定义协程的翻译单元必须导入 `std`，使编译器能够看到标准协程协议类型。CMP 私有导入
 `std`，不会向使用方重新导出整个标准库。
 
-CMP 尚未提供 `sync_wait` 或调度器，因此当前 API 是协程组合基础，而不是完整的应用入口。
-独立示例因此定义了一个很小的私有根协程，只适用于其中同步完成的协程链。已经被移动的
-Task 不得再次等待。
+`RunLoop::run()` 消费一个根 Task，在调用线程执行就绪协程，返回结果并重新抛出异常。
+`Scheduler::schedule()` 始终挂起当前协程并把 continuation 放入队列。Scheduler 可以复制，
+但始终属于创建它的 RunLoop。支持顺序多次调用 `run()`，嵌套或并发调用会被拒绝。已经被
+移动的 Task 不得再次等待。
+
+RunLoop 不是后台线程，也不会把阻塞代码自动变成异步代码。如果 Task 挂起后没有安排未来的
+恢复动作，`run()` 可能一直等待。CMP 不提供隐式线程亲和：外部 awaiter 在其他线程恢复协程
+后，需要显式等待目标 Scheduler 才会返回对应 RunLoop。
 
 ## 仓库结构
 
@@ -108,7 +121,10 @@ Task 不得再次等待。
 ├── .xlings.json              # 固定的项目工具环境
 ├── mcpp.toml                 # 包身份和测试依赖
 ├── src/cmp.cppm              # 根模块接口
+├── src/task.cppm             # Task 模块分区
+├── src/run_loop.cppm         # RunLoop 与 Scheduler 分区
 ├── tests/cmp_test.cpp        # Task 契约和生命周期测试
+├── tests/run_loop_test.cpp   # 调度、边界和线程测试
 ├── examples/basic/           # 独立的路径依赖 consumer
 ├── docs/architecture.zh.md   # 当前结构、边界和演进方向
 └── .github/workflows/        # Linux、macOS 和 Windows CI
@@ -130,7 +146,7 @@ CI 在 Linux、macOS 和 Windows 上执行等价的构建、测试和独立示�
 `.xlings.json` 固定，不应依赖无关的全局 mcpp 安装。
 
 CMP 当前不跟踪 `mcpp.lock`，`.gitignore` 明确执行这一仓库约定。运行时依赖放在
-`[dependencies]`，测试专用依赖放在 `[dev-dependencies]`。
+`[dependencies]`，gtest 明确声明在 `[dev-dependencies.compat]` 中。
 
 ## 路线图
 
@@ -138,7 +154,7 @@ CMP 当前不跟踪 `mcpp.lock`，`.gitignore` 明确执行这一仓库约定。
 
 1. 包身份和可导入模块 bootstrap——已完成；
 2. 协程 task 与生命周期语义——已实现初始 `Task`；
-3. 最小单线程调度器；
+3. 根任务驱动器和最小单线程调度器——已完成初始实现；
 4. 定时器、取消和结构化唤醒路径；
 5. 多 worker 调度与 work stealing；
 6. 异步 I/O 集成和 blocking pool。

@@ -1,7 +1,7 @@
+#include <gtest/gtest.h>
+
 import std;
 import mcpplibs.cmp;
-
-#include <gtest/gtest.h>
 
 namespace {
 
@@ -64,10 +64,10 @@ Task<void> run_nested(RunLoop& loop) {
 
 class ResumeOnNewThread final {
 private:
-    std::jthread* worker_ {};
+    std::thread* worker_ {};
 
 public:
-    explicit ResumeOnNewThread(std::jthread& worker) noexcept
+    explicit ResumeOnNewThread(std::thread& worker) noexcept
         : worker_ { &worker } {}
 
     [[nodiscard]] constexpr bool await_ready() const noexcept {
@@ -77,7 +77,7 @@ public:
     void await_suspend(std::coroutine_handle<> continuation) const {
         // 新线程可能立即恢复协程，因此启动后不再读取 awaiter 成员。
         auto* const worker = worker_;
-        *worker = std::jthread { [continuation] {
+        *worker = std::thread { [continuation] {
             continuation.resume();
         } };
     }
@@ -87,7 +87,7 @@ public:
 
 Task<std::pair<std::thread::id, std::thread::id>> leave_and_return(
     Scheduler scheduler,
-    std::jthread& worker) {
+    std::thread& worker) {
     co_await ResumeOnNewThread { worker };
     const auto workerThread = std::this_thread::get_id();
 
@@ -95,7 +95,7 @@ Task<std::pair<std::thread::id, std::thread::id>> leave_and_return(
     co_return std::pair { workerThread, std::this_thread::get_id() };
 }
 
-Task<std::thread::id> finish_on_new_thread(std::jthread& worker) {
+Task<std::thread::id> finish_on_new_thread(std::thread& worker) {
     co_await ResumeOnNewThread { worker };
     co_return std::this_thread::get_id();
 }
@@ -236,7 +236,7 @@ TEST(CmpRunLoopTest, SchedulingResumesOnTheCallingThread) {
 
 TEST(CmpRunLoopTest, SchedulingReturnsFromAnotherThread) {
     RunLoop loop {};
-    std::jthread worker {};
+    std::thread worker {};
     const auto callingThread = std::this_thread::get_id();
 
     const auto [workerThread, resumedThread] = loop.run(
@@ -252,7 +252,7 @@ TEST(CmpRunLoopTest, SchedulingReturnsFromAnotherThread) {
 
 TEST(CmpRunLoopTest, RootCompletionWakesTheCallingThread) {
     RunLoop loop {};
-    std::jthread worker {};
+    std::thread worker {};
     const auto callingThread = std::this_thread::get_id();
 
     const auto completionThread = loop.run(finish_on_new_thread(worker));
@@ -302,7 +302,7 @@ TEST(CmpRunLoopTest, RejectsConcurrentRunAndRemainsReusable) {
     std::latch suspended { 1 };
     std::exception_ptr driverException {};
 
-    std::jthread driver { [&] {
+    std::thread driver { [&] {
         try {
             loop.run(suspend_manually(continuation, suspended));
         } catch (...) {

@@ -1,7 +1,7 @@
+#include <gtest/gtest.h>
+
 import std;
 import mcpplibs.cmp;
-
-#include <gtest/gtest.h>
 
 namespace {
 

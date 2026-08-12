@@ -4,14 +4,15 @@
 
 ## 目前狀態
 
-CMP 目前是一個初始的 C++23 模組專案。套件可以建置和匯入，但根模組還沒有公開宣告，
-協程執行期也尚未實作。
+CMP 是一個具備小型協程執行核心的 C++23 模組專案。根模組匯出延遲啟動、單一消費者的
+`mcpplibs::cmp::Task<T>`、`RunLoop` 及其可複製的 `Scheduler` 控制代碼。`RunLoop::run()`
+是公開根任務執行邊界，`Scheduler::schedule()` 用於明確地把暫停協程送回對應執行迴圈。
 
 儲存庫現有內容包括：
 
 - 一份 mcpp 套件清單；
-- 只包含模組宣告的根模組 `mcpplibs.cmp`；
-- 一個 gtest 匯入測試；
+- 根模組 `mcpplibs.cmp` 及 Task、RunLoop 模組分割區；
+- 涵蓋契約、生命週期、例外、排程和執行緒行為的 gtest 測試；
 - 一個透過路徑相依使用根套件的獨立範例；
 - Linux、macOS 和 Windows 三套 CI 工作流程。
 
@@ -29,15 +30,14 @@ repo        = "https://github.com/mcpplibs/cmp"
 ```
 
 mcpp 套件由 `mcpplibs` 和 `cmp` 共同識別。使用端在 `[dependencies.mcpplibs]` 中宣告
-`cmp`，在 C++ 原始碼中匯入 `mcpplibs.cmp`。`mcpplibs::cmp` 保留給日後的公開 C++
-宣告使用。
+`cmp`，在 C++ 原始碼中匯入 `mcpplibs.cmp`。公開 C++ 宣告使用 `mcpplibs::cmp` 命名空間。
 
 根模組介面位於 `src/cmp.cppm`，符合 mcpp 預設的函式庫根模組命名規則。儲存庫中沒有
 `src/main.cpp`，因此 mcpp 會推斷出名為 `cmp` 的函式庫目標，不需要額外設定 `[lib]` 或
 `[targets.cmp]`。雖然 C++23 也是 mcpp 的預設標準，清單中仍明確寫出這項基線。
 
-`gtest = "1.15.2"` 是測試使用的開發相依。CMP 目前不追蹤 `mcpp.lock`，該檔案由
-`.gitignore` 排除。
+`compat.gtest = "1.15.2"` 是測試使用的明確命名空間開發相依。CMP 目前不追蹤
+`mcpp.lock`，該檔案由 `.gitignore` 排除。
 
 ## 儲存庫結構
 
@@ -55,16 +55,22 @@ mcpp 套件由 `mcpplibs` 和 `cmp` 共同識別。使用端在 `[dependencies.m
 ├── examples/basic/
 │   ├── mcpp.toml
 │   └── src/main.cpp
-├── src/cmp.cppm
-├── tests/cmp_test.cpp
+├── src/
+│   ├── cmp.cppm
+│   ├── task.cppm
+│   └── run_loop.cppm
+├── tests/
+│   ├── cmp_test.cpp
+│   └── run_loop_test.cpp
 └── mcpp.toml
 ```
 
 ## 建置與測試
 
 `.xlings.json` 固定專案使用的 mcpp 版本。`mcpp build` 建置自動推斷的函式庫目標。
-`mcpp test` 會找到 `tests/cmp_test.cpp`，連結 gtest 進入點，並驗證另一個轉譯單元可以
-匯入 `mcpplibs.cmp`。
+`mcpp test` 會找到兩個測試檔案，並為每個檔案連結 gtest 進入點。測試同時驗證 Task 所有權
+和對稱轉移，以及根任務執行、排程、例外傳播、跨執行緒喚醒、無效 Scheduler、RunLoop
+重複使用和不會增長呼叫堆疊的重複排程。
 
 三套 CI 工作流程都會安裝專案工具、建置函式庫、執行測試並執行 `examples/basic`。不同
 作業系統的工具安裝和執行環境不同，因此分別保留工作流程檔案。
@@ -93,19 +99,73 @@ cmp = { path = "../.." }
 範例程式使用與外部專案相同的匯入路徑：
 
 ```cpp
+import std;
 import mcpplibs.cmp;
 
+using mcpplibs::cmp::Task;
+using mcpplibs::cmp::RunLoop;
+
+Task<int> answer() {
+    co_return 42;
+}
+
+Task<void> print_answer(RunLoop::Scheduler scheduler) {
+    co_await scheduler.schedule();
+    auto value = co_await answer();
+    std::println("Coroutine result: {}", value);
+    co_return;
+}
+
 int main() {
-    return 0;
+    RunLoop loop {};
+    loop.run(print_answer(loop.get_scheduler()));
 }
 ```
 
-這個範例在根測試目標之外，單獨檢查路徑相依解析和模組使用。
+這個範例在根測試目標之外，單獨檢查路徑相依解析、模組使用、外部協程編譯和公開根任務
+驅動器。RunLoop 在主執行緒驅動 `print_answer()`；協程經過明確排程點後輸出
+`Coroutine result: 42`。
+
+任何定義協程的轉譯單元都要自行匯入 `std`，使 `std::coroutine_traits` 和標準協程協定型別
+參與編譯。CMP 模組私下匯入 `std`，而不是向使用端重新匯出整個標準函式庫。
 
 ## 目前邊界
 
-根模組目前沒有提供 `task`、promise 型別、排程器、計時器、取消機制、非同步 I/O 後端或
-阻塞工作執行緒池，也沒有保留舊骨架模組的相容別名。
+`Task<T>` 和 `Task<void>` 遵循以下契約：
+
+- 建構時延遲啟動，協程本體在 Task 被等待時開始執行；
+- 所有權唯一：Task 可以移動建構，但不能複製或移動賦值；
+- `operator co_await()` 僅用於右值，並在等待時消費協程控制代碼；
+- 協程框架保存一個值或 `std::exception_ptr`；
+- 子協程完成後直接轉移到 continuation，避免遞迴呼叫 `resume()`；
+- 未消費的 Task 銷毀自己的框架，消費它的 awaiter 銷毀已完成的框架；
+- 拒絕參考和陣列結果型別。
+
+被移動後的 Task 為空，不得再次等待；目前實作會在違反該契約時終止程序。
+
+`RunLoop` 和 `Scheduler` 遵循以下契約：
+
+- RunLoop 既不能複製也不能移動；它的身分是所有關聯 Scheduler 的生命週期錨點；
+- `run(Task<T>)` 消費一個根 Task，並在呼叫執行緒執行就緒 continuation；
+- 回傳根任務結果，包括 move-only 結果；根任務例外會重新拋出；
+- RunLoop 可以依序重複使用，但巢狀或並行呼叫 `run()` 會拋出 `std::logic_error`；
+- `schedule()` 始終暫停，並把 continuation 追加到執行緒安全的 FIFO 就緒佇列；
+- 其他執行緒可以入列，但只有正在執行 `run()` 的執行緒會消費佇列；
+- RunLoop 銷毀後繼續使用其 Scheduler，或在其所屬 RunLoop 未運行時使用 Scheduler，皆會
+  從 await 運算式拋出 `std::logic_error`；
+- 根任務完成時若仍有單獨排隊的工作，RunLoop 會拒絕退出，因為本階段不支援 detached
+  所有權。
+
+RunLoop 不擁有工作執行緒，也不提供自動執行緒親和。外部 awaiter 可以在其他執行緒恢復
+Task；明確等待原 Scheduler 才會把 continuation 送回對應 RunLoop。如果 Task 暫停後沒有
+安排其他執行緒或事件來源恢復它，`run()` 可能無限等待。阻塞函式仍會阻塞協程目前所在的
+執行緒。
+
+目前沒有公開自由函式 `sync_wait`、detached 執行、計時器、取消機制、非同步 I/O 後端、
+自訂協程框架 allocator 或阻塞工作執行緒池，也沒有保留舊骨架模組的相容別名。
+
+捕捉變數的協程 lambda 需要特別小心：立即呼叫一個暫時的捕捉 lambda，可能使延遲協程參考
+已經銷毀的閉包。CMP 尚未提供延長該閉包生命週期的輔助函式。
 
 CMP 名稱中的 `C` 與 Go 執行期中的 `G` 相呼應，但這只說明命名來源，不表示兩者語意
 等價。標準 C++ 協程提供暫停和恢復機制，本身不包含排程器，也不會把阻塞操作自動變成
@@ -115,14 +175,15 @@ CMP 名稱中的 `C` 與 Go 執行期中的 `G` 相呼應，但這只說明命�
 
 以下方向可以分別設計和審查，目前都不是套件的既有約定：
 
-1. 協程工作的所有權、完成和生命週期規則；
-2. 單執行緒排程器和明確的排程 awaiter；
-3. 計時器、喚醒路徑和取消；
-4. 多工作執行緒排程和工作竊取；
-5. 非同步 I/O 整合；
-6. 處理無法避免之阻塞工作的專用執行緒池。
+1. 結構化任務作用域和並行匯合；
+2. 計時器、喚醒路徑和取消；
+3. 多工作執行緒排程和工作竊取；
+4. 非同步 I/O 整合；
+5. 處理無法避免之阻塞工作的專用執行緒池；
+6. 結果適配器和可選的協程框架配置策略。
 
-只有已實作的 API 確實需要新邊界時，才增加模組分割區或實作單元。
+Task 與 RunLoop 已形成真實的公開邊界，因此分別位於模組分割區中。只有其他已實作 API
+確實需要新邊界時，才繼續增加模組分割區或實作單元。
 
 ## 驗證
 
@@ -135,6 +196,8 @@ cd examples/basic
 mcpp run
 ```
 
-預期結果是函式庫建置成功、一個匯入測試通過，而且範例以狀態 0 結束。目前 Windows
-LLVM 工具鏈不會產生 GNU depfile；如果模組介面包含的檔案發生變更，增量建置可能沿用舊的
-BMI 或目的檔。完整複驗時使用 `--cache=off`。
+預期結果是函式庫建置成功、兩個二進位檔中的 22 項測試全部通過，而且範例輸出
+`Coroutine result: 42` 後以狀態 0 結束。一個測試執行一百萬次立即完成的 Task，另一個
+測試執行十萬次明確排程，用於檢查對稱轉移和佇列排程都不會增長原生呼叫堆疊。目前
+Windows LLVM 工具鏈不會產生 GNU depfile；如果模組介面包含的檔案發生變更，增量建置可能
+沿用舊的 BMI 或目的檔。完整複驗時使用 `--cache=off`。

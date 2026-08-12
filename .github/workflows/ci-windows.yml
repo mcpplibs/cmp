@@ -22,7 +22,7 @@ concurrency:
 env:
   # Both installers read this: the shell one takes it as an argument or an env
   # var, the PowerShell one defaults its -Version parameter to it.
-  XLINGS_VERSION: v2026.7.28.4
+  XLINGS_VERSION: v2026.8.11.2
   XLINGS_NON_INTERACTIVE: '1'
 
 jobs:

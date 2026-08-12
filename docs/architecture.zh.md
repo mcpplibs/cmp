@@ -4,14 +4,15 @@
 
 ## 当前状态
 
-CMP 目前是一个初始的 C++23 模块项目。包可以构建和导入，但根模块还没有公共声明，
-协程运行时也尚未实现。
+CMP 是一个具备小型协程执行核心的 C++23 模块项目。根模块导出懒启动、单消费者的
+`mcpplibs::cmp::Task<T>`、`RunLoop` 及其可复制的 `Scheduler` 句柄。`RunLoop::run()` 是
+公共根任务执行边界，`Scheduler::schedule()` 用于显式地把挂起协程送回对应运行循环。
 
 仓库现有内容包括：
 
 - 一份 mcpp 包清单；
-- 仅包含模块声明的根模块 `mcpplibs.cmp`；
-- 一个 gtest 导入测试；
+- 根模块 `mcpplibs.cmp` 及 Task、RunLoop 模块分区；
+- 覆盖契约、生命周期、异常、调度和线程行为的 gtest 测试；
 - 一个通过路径依赖使用根包的独立示例；
 - Linux、macOS 和 Windows 三套 CI 工作流。
 
@@ -29,15 +30,14 @@ repo        = "https://github.com/mcpplibs/cmp"
 ```
 
 mcpp 包由 `mcpplibs` 和 `cmp` 共同标识。使用方在 `[dependencies.mcpplibs]` 中声明
-`cmp`，在 C++ 源码中导入 `mcpplibs.cmp`。`mcpplibs::cmp` 留作以后公共 C++ 声明
-使用。
+`cmp`，在 C++ 源码中导入 `mcpplibs.cmp`。公共 C++ 声明使用 `mcpplibs::cmp` 命名空间。
 
 根模块接口位于 `src/cmp.cppm`，符合 mcpp 默认的库根模块命名规则。仓库中没有
 `src/main.cpp`，因此 mcpp 会推断出名为 `cmp` 的库目标，不需要额外配置 `[lib]` 或
 `[targets.cmp]`。虽然 C++23 也是 mcpp 的默认标准，清单中仍然明确写出这一基线。
 
-`gtest = "1.15.2"` 是测试使用的开发依赖。CMP 当前不跟踪 `mcpp.lock`，该文件由
-`.gitignore` 排除。
+`compat.gtest = "1.15.2"` 是测试使用的显式命名空间开发依赖。CMP 当前不跟踪
+`mcpp.lock`，该文件由 `.gitignore` 排除。
 
 ## 仓库结构
 
@@ -55,16 +55,22 @@ mcpp 包由 `mcpplibs` 和 `cmp` 共同标识。使用方在 `[dependencies.mcpp
 ├── examples/basic/
 │   ├── mcpp.toml
 │   └── src/main.cpp
-├── src/cmp.cppm
-├── tests/cmp_test.cpp
+├── src/
+│   ├── cmp.cppm
+│   ├── task.cppm
+│   └── run_loop.cppm
+├── tests/
+│   ├── cmp_test.cpp
+│   └── run_loop_test.cpp
 └── mcpp.toml
 ```
 
 ## 构建与测试
 
 `.xlings.json` 固定项目使用的 mcpp 版本。`mcpp build` 构建自动推断的库目标。
-`mcpp test` 发现 `tests/cmp_test.cpp`，链接 gtest 入口，并验证另一个翻译单元可以导入
-`mcpplibs.cmp`。
+`mcpp test` 发现两个测试文件，并为每个文件链接 gtest 入口。测试同时验证 Task 所有权和
+对称转移，以及根任务执行、调度、异常传播、跨线程唤醒、无效 Scheduler、RunLoop 复用和
+不会增长调用栈的重复调度。
 
 三套 CI 工作流都会安装项目工具、构建库、运行测试并执行 `examples/basic`。不同操作系统
 的工具安装和运行环境不同，因此分别保留工作流文件。
@@ -93,19 +99,72 @@ cmp = { path = "../.." }
 示例程序使用与外部项目相同的导入路径：
 
 ```cpp
+import std;
 import mcpplibs.cmp;
 
+using mcpplibs::cmp::Task;
+using mcpplibs::cmp::RunLoop;
+
+Task<int> answer() {
+    co_return 42;
+}
+
+Task<void> print_answer(RunLoop::Scheduler scheduler) {
+    co_await scheduler.schedule();
+    auto value = co_await answer();
+    std::println("Coroutine result: {}", value);
+    co_return;
+}
+
 int main() {
-    return 0;
+    RunLoop loop {};
+    loop.run(print_answer(loop.get_scheduler()));
 }
 ```
 
-该示例在根测试目标之外，单独检查路径依赖解析和模块使用。
+该示例在根测试目标之外，单独检查路径依赖解析、模块使用、外部协程编译和公共根任务驱动器。
+RunLoop 在主线程驱动 `print_answer()`；协程经过显式调度点后输出
+`Coroutine result: 42`。
+
+任何定义协程的翻译单元都要自行导入 `std`，使 `std::coroutine_traits` 和标准协程协议类型
+参与编译。CMP 模块私有导入 `std`，而不是向使用方重新导出整个标准库。
 
 ## 当前边界
 
-根模块目前没有提供 `task`、promise 类型、调度器、定时器、取消机制、异步 I/O 后端或
-阻塞任务线程池，也没有保留旧脚手架模块的兼容别名。
+`Task<T>` 和 `Task<void>` 遵循以下契约：
+
+- 构造时懒启动，协程体在 Task 被等待时开始执行；
+- 所有权唯一：Task 可以移动构造，但不能复制或移动赋值；
+- `operator co_await()` 仅用于右值，并在等待时消费协程句柄；
+- 协程帧保存一个值或 `std::exception_ptr`；
+- 子协程完成后直接转移到 continuation，避免递归调用 `resume()`；
+- 未消费的 Task 销毁自己的帧，消费它的 awaiter 销毁已经完成的帧；
+- 拒绝引用和数组结果类型。
+
+被移动后的 Task 为空，不得再次等待；当前实现会在违反该契约时终止进程。
+
+`RunLoop` 和 `Scheduler` 遵循以下契约：
+
+- RunLoop 既不能复制也不能移动；它的身份是所有关联 Scheduler 的生命周期锚点；
+- `run(Task<T>)` 消费一个根 Task，并在调用线程执行就绪 continuation；
+- 返回根任务结果，包括 move-only 结果；根任务异常会重新抛出；
+- RunLoop 可以顺序复用，但嵌套或并发调用 `run()` 会抛出 `std::logic_error`；
+- `schedule()` 始终挂起，并把 continuation 追加到线程安全的 FIFO 就绪队列；
+- 其他线程可以入队，但只有正在执行 `run()` 的线程会消费队列；
+- RunLoop 销毁后继续使用其 Scheduler，或在其所属 RunLoop 未运行时使用 Scheduler，都会
+  从 await 表达式抛出 `std::logic_error`；
+- 根任务完成时如果仍存在单独排队的工作，RunLoop 会拒绝退出，因为本阶段不支持 detached
+  所有权。
+
+RunLoop 不拥有工作线程，也不提供自动线程亲和。外部 awaiter 可以在其他线程恢复 Task；
+显式等待原 Scheduler 才会把 continuation 送回对应 RunLoop。如果 Task 挂起后没有安排
+其他线程或事件源恢复它，`run()` 可能无限等待。阻塞函数仍会阻塞协程当前所在的线程。
+
+目前没有公共自由函数 `sync_wait`、detached 执行、定时器、取消机制、异步 I/O 后端、
+自定义协程帧 allocator 或阻塞任务线程池，也没有保留旧脚手架模块的兼容别名。
+
+捕获变量的协程 lambda 需要特别小心：立即调用一个临时的捕获 lambda，可能使懒协程引用
+已经销毁的闭包。CMP 尚未提供延长该闭包生命周期的辅助函数。
 
 CMP 名称中的 `C` 与 Go 运行时中的 `G` 相呼应，但这只说明命名来源，不表示两者语义等价。
 标准 C++ 协程提供挂起和恢复机制，本身不包含调度器，也不会把阻塞操作自动变成异步操作。
@@ -114,14 +173,15 @@ CMP 名称中的 `C` 与 Go 运行时中的 `G` 相呼应，但这只说明命�
 
 以下方向可以分别设计和评审，目前都不是包的既有约定：
 
-1. 协程任务的所有权、完成和生命周期规则；
-2. 单线程调度器和显式调度 awaiter；
-3. 定时器、唤醒路径和取消；
-4. 多工作线程调度和工作窃取；
-5. 异步 I/O 集成；
-6. 处理不可避免的阻塞工作的专用线程池。
+1. 结构化任务作用域和并发汇合；
+2. 定时器、唤醒路径和取消；
+3. 多工作线程调度和工作窃取；
+4. 异步 I/O 集成；
+5. 处理不可避免的阻塞工作的专用线程池；
+6. 结果适配器和可选的协程帧分配策略。
 
-只有已实现的 API 确实需要新的边界时，才增加模块分区或实现单元。
+Task 与 RunLoop 已经形成真实的公共边界，因此分别位于模块分区中。只有其他已实现 API
+确实需要新边界时，才继续增加模块分区或实现单元。
 
 ## 验证
 
@@ -134,6 +194,8 @@ cd examples/basic
 mcpp run
 ```
 
-预期结果是库构建成功、一个导入测试通过，并且示例以状态 0 退出。当前 Windows LLVM
+预期结果是库构建成功、两个二进制中的 22 项测试全部通过，并且示例输出
+`Coroutine result: 42` 后以状态 0 退出。一个测试执行一百万次立即完成的 Task，另一个测试
+执行十万次显式调度，用于检查对称转移和队列调度都不会增长原生调用栈。当前 Windows LLVM
 工具链不会生成 GNU depfile；如果模块接口包含的文件发生变化，增量构建可能复用旧的 BMI
 或目标文件。完整复验时使用 `--cache=off`。

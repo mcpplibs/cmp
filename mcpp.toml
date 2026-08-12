@@ -8,5 +8,8 @@ license     = "Apache-2.0"
 authors     = ["mcpplibs"]
 repo        = "https://github.com/mcpplibs/cmp"
 
-[dev-dependencies]
+[toolchain]
+default = "llvm@22.1.8"
+
+[dev-dependencies.compat]
 gtest = "1.15.2"

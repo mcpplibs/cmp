@@ -31,8 +31,11 @@ docs, and actual command output.
 - `docs/architecture.md` (`.zh.md`, `.zh.hant.md`) — current structure, mcpp conventions, runtime boundaries, CI.
 - `.xlings.json` — the project tool environment (which mcpp version builds this).
 - `mcpp.toml` — package metadata, dependencies, dev-dependencies.
-- `src/cmp.cppm` — the import-only CMP root module interface.
-- `tests/cmp_test.cpp` — the gtest import smoke test.
+- `src/cmp.cppm` — the CMP root module interface, re-exporting its public partitions.
+- `src/task.cppm` — lazy single-consumer Task implementation.
+- `src/run_loop.cppm` — caller-thread RunLoop, Scheduler, and root driver.
+- `tests/cmp_test.cpp` — Task contract and lifetime tests.
+- `tests/run_loop_test.cpp` — scheduling, threading, and invalid-use boundary tests.
 - `examples/basic/` — a standalone path-dependency consumer.
 - `.github/workflows/ci-{linux,macos,windows}.yml` — per-platform build, test, and example CI.
 
@@ -87,6 +90,6 @@ mcpp --version
 - **Confirm an `mcpp.toml` field** → `mcpp.toml`, the [`mcpp`](../mcpp/SKILL.md) skill, then upstream `docs/05-mcpp-toml.md`.
 - **Add a dependency** → the [`mcpp-index`](../mcpp-index/SKILL.md) skill, then `mcpplibs/cmdline` for a real example.
 - **Add a module API** → `mcpp-style-ref`, then edit `src/*.cppm`.
-- **Add a test** → follow `tests/cmp_test.cpp`, verify with `mcpp test`.
+- **Add a test** → follow the focused file under `tests/`, verify with `mcpp test`.
 - **Add an example** → follow `examples/basic/` — its own `mcpp.toml` with a path dependency.
 - **Publish the library** → the [`mcpp-index`](../mcpp-index/SKILL.md) skill.

@@ -9,7 +9,7 @@ The build and package tool this repository is built with. mcpp is module-first C
 `import std` works out of the box, toolchains install into an isolated sandbox, and
 dependencies resolve through a package index.
 
-Verified against **mcpp 2026.8.1.1**. mcpp is pre-1.0 and moves fast — when this skill and
+Verified against **mcpp 2026.8.11.2**. mcpp is pre-1.0 and moves fast — when this skill and
 the tool disagree, the tool wins. Check with `mcpp --help`, `mcpp <cmd> --help`, and the
 [upstream docs](https://github.com/mcpp-community/mcpp/tree/main/docs).
 
@@ -81,12 +81,12 @@ defines       = ["FOO=1"]     # bare names; reach every TU including module scan
 default-profile = "release"   # project default when no --profile/--release is passed
 
 [dependencies]                # runtime deps
-cmdline = "0.0.2"             # bare name: searched in mcpplibs, then compat, then no-namespace
+cmdline = "0.0.2"             # bare name: mcpplibs namespace
 
 [dependencies.mcpplibs]       # namespace sub-table (preferred for several from one org)
 tinyhttps = "0.2.3"
 
-[dev-dependencies]            # test-only; `mcpp build` ignores these
+[dev-dependencies.compat]     # test-only; `mcpp build` ignores these
 gtest = "1.15.2"
 
 [toolchain]
@@ -103,10 +103,10 @@ Dependency forms: `"1.2.3"` · `"^1.2"` · `"~1.2"` · `">=1.0, <2.0"` ·
 `{ path = "../mylib" }` · `{ git = "...", tag = "v1.0.0" }` ·
 `{ version = "0.0.3", features = ["docking"] }`.
 
-**Namespace rule:** a bare name resolves in exactly three places, in order — `mcpplibs`,
-`compat` (third-party C/C++ wrappers), then packages that declare no namespace. Any other
-namespace must be written out: `"chriskohlhoff.asio" = "1.38.1"` or a
-`[dependencies.chriskohlhoff]` sub-table.
+**Namespace rule:** a bare name means `mcpplibs`. Compatibility fallback to `compat` is deprecated
+in 2026.8 and removed in 2026.9, so third-party wrappers and every other namespace must be explicit:
+`[dependencies.compat]`, `"chriskohlhoff.asio" = "1.38.1"`, or the corresponding namespace
+sub-table.
 
 ## Modules
 

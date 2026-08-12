@@ -25,7 +25,7 @@ env:
   # Pinned rather than "newest": a bootstrap that floats turns an upstream
   # release into a red build on an unrelated PR. Floor is xlings 0.4.69
   # (the index keys by (namespace, name) from there on) — never pin below it.
-  XLINGS_VERSION: v2026.7.28.4
+  XLINGS_VERSION: v2026.8.11.2
   XLINGS_NON_INTERACTIVE: '1'
 
 jobs:

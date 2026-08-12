@@ -16,7 +16,8 @@
 [![ci-windows](https://github.com/mcpplibs/cmp/actions/workflows/ci-windows.yml/badge.svg?branch=main)](https://github.com/mcpplibs/cmp/actions/workflows/ci-windows.yml)
 
 > [!IMPORTANT]
-> CMP 目前處於 **bootstrap 階段**。套件已經匯出根模組 `mcpplibs.cmp`，但尚未提供協程執行期 API。
+> CMP 已提供延遲啟動、單一消費者的 `Task<T>` / `Task<void>`，以及在呼叫執行緒運行、
+> 支援明確排程的 `RunLoop`。取消、計時器、非同步 I/O 和 detached 執行尚未實作。
 
 CMP 計畫以標準無堆疊 C++ 協程建構現代協程執行期與函式庫。專案將以明確的 `co_await`
 為主線，透過經過驗證的小步驟逐步探索排程、計時器、非同步 I/O、取消，以及阻塞工作的安全隔離。
@@ -66,20 +67,52 @@ cd examples/basic
 mcpp run
 ```
 
-範例會以成功狀態結束且不產生輸出。它只負責證明獨立 mcpp 套件能夠解析路徑相依並匯入
-`mcpplibs.cmp`。
+範例會從經過排程的 `Task<void>` 協程內部印出 `Coroutine result: 42`，然後以成功狀態結束。
+它負責證明獨立 mcpp 套件能夠解析路徑相依、匯入 `mcpplibs.cmp`、組合 Task 並透過公開
+RunLoop 驅動任務。
 
-## 目前模組
+## 目前 API
 
 ```cpp
+import std;
 import mcpplibs.cmp;
 
+using mcpplibs::cmp::Task;
+using mcpplibs::cmp::RunLoop;
+
+Task<int> answer() {
+    co_return 42;
+}
+
+Task<void> print_answer(RunLoop::Scheduler scheduler) {
+    co_await scheduler.schedule();
+    auto value = co_await answer();
+    std::println("Coroutine result: {}", value);
+    co_return;
+}
+
 int main() {
-    return 0;
+    RunLoop loop {};
+    loop.run(print_answer(loop.get_scheduler()));
 }
 ```
 
-bootstrap 階段的模組刻意不包含公開宣告。未來公共 API 將使用 `mcpplibs::cmp` 命名空間。
+`Task` 採延遲啟動：呼叫 `answer()` 只建立處於暫停狀態的協程，在被 `co_await` 消費時才
+開始執行。Task 只能移動、只有一個消費者且只能作為右值等待；它保存值或例外，在子協程與
+continuation 之間直接轉移，並透過 RAII 銷毀未消費的協程框架。目前刻意不支援 `Task<T&>`、
+複製、移動賦值和 detached 執行。
+
+定義協程的轉譯單元必須匯入 `std`，使編譯器能夠看到標準協程協定型別。CMP 私下匯入
+`std`，不會向使用端重新匯出整個標準函式庫。
+
+`RunLoop::run()` 消費一個根 Task，在呼叫執行緒執行就緒協程，回傳結果並重新拋出例外。
+`Scheduler::schedule()` 始終暫停目前協程並把 continuation 放入佇列。Scheduler 可以複製，
+但始終屬於建立它的 RunLoop。支援依序多次呼叫 `run()`，巢狀或並行呼叫會被拒絕。已經被
+移動的 Task 不得再次等待。
+
+RunLoop 不是背景執行緒，也不會把阻塞程式碼自動變成非同步程式碼。如果 Task 暫停後沒有
+安排未來的恢復動作，`run()` 可能一直等待。CMP 不提供隱式執行緒親和：外部 awaiter 在其他
+執行緒恢復協程後，需要明確等待目標 Scheduler 才會返回對應 RunLoop。
 
 ## 儲存庫結構
 
@@ -88,7 +121,10 @@ bootstrap 階段的模組刻意不包含公開宣告。未來公共 API 將使�
 ├── .xlings.json                   # 固定的專案工具環境
 ├── mcpp.toml                      # 套件識別與測試相依
 ├── src/cmp.cppm                   # 根模組介面
-├── tests/cmp_test.cpp             # 匯入 smoke 測試
+├── src/task.cppm                  # Task 模組分割區
+├── src/run_loop.cppm              # RunLoop 與 Scheduler 分割區
+├── tests/cmp_test.cpp             # Task 契約和生命週期測試
+├── tests/run_loop_test.cpp        # 排程、邊界和執行緒測試
 ├── examples/basic/                # 獨立的路徑相依 consumer
 ├── docs/architecture.zh.hant.md   # 目前結構、邊界與演進方向
 └── .github/workflows/             # Linux、macOS 和 Windows CI
@@ -110,20 +146,20 @@ CI 在 Linux、macOS 和 Windows 上執行等價的建構、測試與獨立範�
 `.xlings.json` 固定，不應依賴無關的全域 mcpp 安裝。
 
 CMP 目前不追蹤 `mcpp.lock`，`.gitignore` 明確執行這項儲存庫約定。執行期相依放在
-`[dependencies]`，測試專用相依放在 `[dev-dependencies]`。
+`[dependencies]`，gtest 明確宣告在 `[dev-dependencies.compat]` 中。
 
 ## 路線圖
 
-執行期工作將拆分為可以獨立審查的階段：
+執行期工作拆分為可以獨立審查的階段：
 
-1. 套件識別與可匯入模組 bootstrap；
-2. 協程 task 與生命週期語意；
-3. 最小單執行緒排程器；
+1. 套件識別與可匯入模組 bootstrap——已完成；
+2. 協程 task 與生命週期語意——已實作初始 `Task`；
+3. 根任務驅動器和最小單執行緒排程器——已完成初始實作；
 4. 計時器、取消和結構化喚醒路徑；
 5. 多 worker 排程與 work stealing；
 6. 非同步 I/O 整合和 blocking pool。
 
-bootstrap 之後的順序只是方向，不代表這些能力已經實作。
+剩餘順序只是方向，不代表列出的能力已經實作。
 
 ## 參與貢獻
 

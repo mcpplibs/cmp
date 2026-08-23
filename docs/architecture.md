@@ -8,7 +8,8 @@ CMP is a C++23 module project with a small coroutine execution core. The root mo
 lazy, single-consumer `mcpplibs::cmp::Task<T>`, `RunLoop`, and its copyable `Scheduler` handle.
 `RunLoop::run()` is the public root execution boundary, while `Scheduler::schedule()` explicitly
 returns a suspended coroutine to that loop. `schedule_after()` and `schedule_at()` add relative
-and absolute `steady_clock` deadlines without a timer thread.
+and absolute `steady_clock` deadlines without a timer thread; overloads accepting
+`std::stop_token` make those waits cooperatively cancellable.
 
 The repository contains:
 
@@ -74,8 +75,8 @@ targets. CMP does not track an `mcpp.lock` file; it is excluded by `.gitignore`.
 `.xlings.json` pins the mcpp version used by the project. `mcpp build` builds the inferred library
 target. `mcpp test` discovers both test files and links a gtest entry point for each. The tests
 verify Task ownership and symmetric transfer together with root execution, scheduling, exception
-propagation, timed and cross-thread wake-up, invalid scheduler use, loop reuse, and stack-safe
-repeated scheduling.
+propagation, timed and cross-thread wake-up, cancellation races, invalid scheduler use, loop reuse,
+and stack-safe repeated scheduling.
 
 Each CI workflow installs the project tools, builds the library, runs the test suite, and runs
 `examples/basic`. The workflows are separate because tool installation and runner details differ
@@ -111,6 +112,7 @@ import mcpplibs.cmp;
 
 using mcpplibs::cmp::Task;
 using mcpplibs::cmp::RunLoop;
+using mcpplibs::cmp::OperationCancelled;
 
 using namespace std::chrono_literals;
 
@@ -125,16 +127,30 @@ Task<void> print_answer(RunLoop::Scheduler scheduler) {
     co_return;
 }
 
+Task<void> print_cancellation(RunLoop::Scheduler scheduler, std::stop_token token) {
+    try {
+        co_await scheduler.schedule_after(1s, token);
+    } catch (const OperationCancelled&) {
+        std::println("Coroutine cancelled");
+    }
+    co_return;
+}
+
 int main() {
     RunLoop loop {};
     loop.run(print_answer(loop.get_scheduler()));
+
+    std::stop_source source {};
+    source.request_stop();
+    loop.run(print_cancellation(loop.get_scheduler(), source.get_token()));
 }
 ```
 
 This example checks path dependency resolution, module consumption, external coroutine
 compilation, and the public root runner independently of the root test targets. The RunLoop drives
 `print_answer()` on the main thread; a short monotonic timer expires before the coroutine prints
-`Coroutine result: 42`.
+`Coroutine result: 42`. A second coroutine then catches `OperationCancelled` from a pre-cancelled
+timed wait and prints `Coroutine cancelled`.
 
 Any translation unit that defines a coroutine imports `std` itself so `std::coroutine_traits` and
 the standard coroutine protocol types participate in compilation. The CMP module imports `std`
@@ -165,8 +181,12 @@ contract violation.
 - `schedule()` always suspends and appends its continuation to a thread-safe FIFO ready queue;
 - `schedule_after()` measures a native `steady_clock` duration at suspension, while
   `schedule_at()` accepts an absolute steady-clock time point;
+- token-taking timed overloads always suspend; cancellation wins by throwing
+  `OperationCancelled`, while a late stop request cannot replace a deadline already queued;
 - elapsed deadlines remain asynchronous; future deadlines use a minimum timer heap, and expiry
   only makes the continuation eligible for FIFO dispatch;
+- stop callbacks only change timer state and wake the RunLoop; they never resume user coroutine
+  code inline, and cancellation currently locates its timer with an O(n) scan;
 - producers may enqueue from other threads, but only the thread inside `run()` consumes the queue;
 - using a Scheduler after its RunLoop is destroyed, or while its own RunLoop is not active, throws
   `std::logic_error` from the await expression;
@@ -179,9 +199,10 @@ the continuation to its RunLoop. A Task that suspends without arranging another 
 source to resume it can leave `run()` blocked indefinitely. Blocking functions still block the
 thread on which the coroutine currently executes.
 
-There is no public free-standing `sync_wait`, detached execution, timer cancellation mechanism,
-asynchronous I/O backend, custom frame allocator, or blocking-work pool. The module also provides
-no compatibility alias for the old scaffold module.
+There is no public free-standing `sync_wait`, detached execution, standalone Timer handle,
+asynchronous I/O backend, custom frame allocator, or blocking-work pool. Cancellation is explicit
+on timed waits only; the module provides neither implicit propagation nor a token overload for
+plain `schedule()`, and no compatibility alias for the old scaffold module.
 
 Capturing coroutine lambdas require particular care: invoking a temporary capturing lambda can
 leave the lazy coroutine referring to a destroyed closure. CMP does not yet provide a helper that
@@ -196,8 +217,8 @@ scheduler and do not make a blocking operation asynchronous.
 The following areas may be considered in separate designs. They are not part of the current
 package contract:
 
-1. structured task scopes and concurrent joins;
-2. cancellation and structured wake-up paths;
+1. structured task scopes, concurrent joins, and cancellation propagation;
+2. additional structured wake-up paths;
 3. multi-worker scheduling and work stealing;
 4. asynchronous I/O integrations;
 5. a dedicated pool for unavoidable blocking work;
@@ -218,10 +239,10 @@ cd examples/basic
 mcpp run
 ```
 
-The expected result is a successful library build, 29 passing tests across two binaries, and an
-example that prints `Coroutine result: 42` and exits with status 0. Tests perform one million
-immediate Task completions, 100,000 explicit schedules, and 100,000 immediate timers. These check
-that symmetric transfer and both queued paths do not grow the native call stack. The current
-Windows LLVM toolchain does not emit GNU depfiles. If a file
-included by a module interface changes, an incremental build can reuse an older BMI or object;
-`--cache=off` is used for a full local verification.
+The expected result is a successful library build, 38 passing tests across two binaries, and an
+example that prints `Coroutine result: 42` followed by `Coroutine cancelled` and exits with status
+0. Tests perform one million immediate Task completions, 100,000 explicit schedules, 100,000
+immediate timers, and 100,000 pre-cancelled timed waits. These check that symmetric transfer and
+all queued paths do not grow the native call stack. The current Windows LLVM toolchain does not
+emit GNU depfiles. If a file included by a module interface changes, an incremental build can reuse
+an older BMI or object; `--cache=off` is used for a full local verification.

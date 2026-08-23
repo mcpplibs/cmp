@@ -17,13 +17,13 @@
 
 > [!IMPORTANT]
 > CMP provides a lazy, single-consumer `Task<T>` / `Task<void>` and a caller-thread `RunLoop`
-> with explicit and monotonic timed scheduling. Cancellation, asynchronous I/O, and detached
-> execution are not implemented.
+> with explicit and monotonic timed scheduling. Timed waits support cooperative cancellation with
+> `std::stop_token`; asynchronous I/O and detached execution are not implemented.
 
 CMP is being built as a modern coroutine runtime and library on standard stackless C++
-coroutines. Its explicit `co_await` model now covers scheduling and monotonic timers and can grow,
-in small verified steps, toward asynchronous I/O, cancellation, and safe handling of blocking
-work.
+coroutines. Its explicit `co_await` model now covers scheduling, monotonic timers, and cancellable
+timed waits and can grow, in small verified steps, toward asynchronous I/O and safe handling of
+blocking work.
 
 ## Why CMP?
 
@@ -48,7 +48,7 @@ promise that:
 - a task is automatically equivalent to a Go goroutine;
 - an arbitrary blocking call becomes non-blocking;
 - coroutine switching is safe directly inside a signal handler;
-- M:N scheduling, work stealing, cancellation, or async I/O already exist.
+- M:N scheduling, work stealing, general cancellation propagation, or async I/O already exist.
 
 Those capabilities must be designed and verified individually. The expected direction is
 explicit async I/O awaiters, a dedicated blocking pool, and cooperative safe points.
@@ -72,10 +72,10 @@ cd examples/basic
 mcpp run
 ```
 
-The example waits for a short RunLoop timer, prints `Coroutine result: 42` from inside a
-`Task<void>` coroutine, and exits successfully. It proves that an independent mcpp package can
-resolve the path dependency, import `mcpplibs.cmp`, compose Tasks, and use timed scheduling through
-the public RunLoop.
+The example prints `Coroutine result: 42` after a short RunLoop timer, then prints
+`Coroutine cancelled` from a pre-cancelled timed wait. Both messages come from `Task<void>`
+coroutines. It proves that an independent mcpp package can import `mcpplibs.cmp`, compose Tasks,
+and use timed scheduling and cancellation through the public RunLoop.
 
 ## Current API
 
@@ -85,6 +85,7 @@ import mcpplibs.cmp;
 
 using mcpplibs::cmp::Task;
 using mcpplibs::cmp::RunLoop;
+using mcpplibs::cmp::OperationCancelled;
 
 using namespace std::chrono_literals;
 
@@ -99,9 +100,22 @@ Task<void> print_answer(RunLoop::Scheduler scheduler) {
     co_return;
 }
 
+Task<void> print_cancellation(RunLoop::Scheduler scheduler, std::stop_token token) {
+    try {
+        co_await scheduler.schedule_after(1s, token);
+    } catch (const OperationCancelled&) {
+        std::println("Coroutine cancelled");
+    }
+    co_return;
+}
+
 int main() {
     RunLoop loop {};
     loop.run(print_answer(loop.get_scheduler()));
+
+    std::stop_source source {};
+    source.request_stop();
+    loop.run(print_cancellation(loop.get_scheduler(), source.get_token()));
 }
 ```
 
@@ -122,6 +136,11 @@ continuation. `schedule_after()` waits for a relative `steady_clock` duration, w
 never resumes it inline. Scheduler handles are copyable, but remain tied to their originating
 RunLoop. Sequential `run()` calls are supported; nested or concurrent calls are rejected. A
 moved-from Task must not be awaited.
+
+The timed overloads accepting `std::stop_token` also always suspend. If cancellation wins before
+the deadline, awaiting throws `OperationCancelled`; a late stop request cannot replace an already
+queued deadline completion. The stop callback only wakes the RunLoop, so user coroutine code is
+still resumed by the thread driving `run()`. Cancellation currently performs an O(n) timer lookup.
 
 RunLoop is not a background thread and does not make blocking code asynchronous. A Task that
 suspends without arranging a future resume can leave `run()` waiting indefinitely. CMP does not
@@ -171,7 +190,8 @@ Runtime work is split into independently reviewable phases:
 1. package identity and importable-module bootstrap — implemented;
 2. coroutine task and lifetime semantics — initial `Task` implemented;
 3. a root runner and minimal single-thread scheduler — initially implemented;
-4. monotonic Timer v1 — implemented; cancellation and structured wake-up paths remain;
+4. monotonic Timer v1 and cancellable timed waits — implemented; structured task ownership and
+   wake-up paths remain;
 5. multi-worker scheduling and work stealing;
 6. asynchronous I/O integration and a blocking pool.
 

@@ -72,8 +72,8 @@ mcpp run
 
 示例会打印 `Coroutine result: 42`，汇合两个定时 Task 后打印 `Concurrent result: 42`，
 eager 启动两个作用域 Task 后打印 `Task group result: 42`，等待一次性通知后打印
-`Event signalled`，最后从预先取消的定时等待打印 `Coroutine cancelled`；所有输出都在
-`Task<void>` 协程内部。两个受保护 Task 还会打印 `Mutex result: 42`。
+`Event signalled`，运行两个受保护 Task 后打印 `Mutex result: 42`，最后从预先取消的定时等待
+打印 `Coroutine cancelled`；所有输出都在 `Task<void>` 协程内部。
 
 ## 当前 API
 

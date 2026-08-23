@@ -3,7 +3,7 @@
 **Date:** 2026-08-24
 **Design:** `docs/superpowers/specs/2026-08-24-cmp-async-mutex-v1-design.md`
 **Branch:** `feature/async-mutex-v1`
-**Status:** Implemented; local verification complete, delivery pending
+**Status:** Complete; merged in PR #9
 
 ## 1. Add failing public-contract tests
 
@@ -34,9 +34,9 @@ architecture languages describe the same API and boundaries.
 
 ## 4. Verify and deliver
 
-**In progress.** Strict cache-off Dev and Release builds and 74/74 tests pass. The Release mutex
-suite passes 50/50 repeats and cross-thread ownership passes 5,000/5,000. Commit, PR,
-three-platform CI, merge, and main synchronization remain.
+**Complete.** Strict cache-off Dev and Release builds and 74/74 tests pass. The Release mutex suite
+passes 50/50 repeats and cross-thread ownership passes 5,000/5,000. PR #9 and the merged `main`
+commit passed Linux, macOS, and Windows CI before local `main` synchronization.
 
 - Run strict cache-off Dev and Release builds and all tests.
 - Repeat focused Release hand-off suites and self-review guard ownership and queue races.

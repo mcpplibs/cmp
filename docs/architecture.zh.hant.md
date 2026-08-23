@@ -237,10 +237,9 @@ int main() {
 驅動器。RunLoop 在主執行緒驅動 `print_answer()`；短單調時鐘計時器到期後，協程輸出
 `Coroutine result: 42`。下一個根任務並行匯合兩個定時結果並輸出
 `Concurrent result: 42`。隨後一個協程 eager 啟動並匯合兩個 void Task，再輸出
-`Task group result: 42`。另一個協程等待一次性訊號並輸出 `Event signalled`。最後一個協程從
-預先取消的定時等待捕捉 `OperationCancelled`，並輸出 `Coroutine cancelled`。
-
-兩個受保護 Task 另會輸出 `Mutex result: 42`。
+`Task group result: 42`。另一個協程等待一次性訊號並輸出 `Event signalled`，兩個受保護 Task
+隨後輸出 `Mutex result: 42`。最後一個協程從預先取消的定時等待捕捉 `OperationCancelled`，並
+輸出 `Coroutine cancelled`。
 
 任何定義協程的轉譯單元都要自行匯入 `std`，使 `std::coroutine_traits` 和標準協程協定型別
 參與編譯。CMP 模組私下匯入 `std`，而不是向使用端重新匯出整個標準函式庫。

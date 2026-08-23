@@ -245,8 +245,8 @@ compilation, and the public root runner independently of the root test targets. 
 `Coroutine result: 42`. The next root Task concurrently joins two timed values and prints
 `Concurrent result: 42`. The next coroutine eagerly spawns and joins two void Tasks before printing
 `Task group result: 42`. Another coroutine awaits a one-time signal and prints `Event signalled`.
-Two guarded Tasks produce `Mutex result: 42`. A final coroutine catches `OperationCancelled` from a pre-cancelled timed wait and prints
-`Coroutine cancelled`.
+Two guarded Tasks produce `Mutex result: 42`. A final coroutine catches `OperationCancelled` from
+a pre-cancelled timed wait and prints `Coroutine cancelled`.
 
 Any translation unit that defines a coroutine imports `std` itself so `std::coroutine_traits` and
 the standard coroutine protocol types participate in compilation. The CMP module imports `std`

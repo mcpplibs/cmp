@@ -236,9 +236,9 @@ int main() {
 该示例在根测试目标之外，单独检查路径依赖解析、模块使用、外部协程编译和公共根任务驱动器。
 RunLoop 在主线程驱动 `print_answer()`；短单调时钟定时器到期后，协程输出
 `Coroutine result: 42`。下一个根任务并发汇合两个定时结果并输出 `Concurrent result: 42`。
-随后一个协程 eager 启动并汇合两个 void Task，再输出 `Task group result: 42`。最后一个协程
-等待一次性信号并输出 `Event signalled`。最后一个协程从预先取消的定时等待捕获
-`OperationCancelled`。两个受保护 Task 输出 `Mutex result: 42`，最后输出 `Coroutine cancelled`。
+随后一个协程 eager 启动并汇合两个 void Task，再输出 `Task group result: 42`。另一个协程
+等待一次性信号并输出 `Event signalled`，两个受保护 Task 随后输出 `Mutex result: 42`。最后一个
+协程从预先取消的定时等待捕获 `OperationCancelled`，并输出 `Coroutine cancelled`。
 
 任何定义协程的翻译单元都要自行导入 `std`，使 `std::coroutine_traits` 和标准协程协议类型
 参与编译。CMP 模块私有导入 `std`，而不是向使用方重新导出整个标准库。

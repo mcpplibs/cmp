@@ -1,7 +1,7 @@
 # CMP AsyncMutex v1 Design
 
 **Date:** 2026-08-24
-**Status:** Implemented; local verification complete, delivery pending
+**Status:** Implemented, verified, and merged in PR #9
 **Base:** `main` at `f8ae3e5`
 **Branch:** `feature/async-mutex-v1`
 

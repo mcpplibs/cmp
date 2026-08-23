@@ -76,8 +76,8 @@ mcpp run
 
 The example prints `Coroutine result: 42`, joins two timed Tasks and prints
 `Concurrent result: 42`, eagerly spawns two scoped Tasks and prints `Task group result: 42`, awaits
-a one-time notification and prints `Event signalled`, then prints `Coroutine cancelled` from a
-pre-cancelled timed wait. It also prints `Mutex result: 42` after two guarded Tasks. All messages
+a one-time notification and prints `Event signalled`, runs two guarded Tasks and prints
+`Mutex result: 42`, then prints `Coroutine cancelled` from a pre-cancelled timed wait. All messages
 come from `Task<void>` coroutines.
 
 ## Current API

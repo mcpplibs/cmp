@@ -5,8 +5,8 @@
 ## 目前狀態
 
 CMP 是一個具備小型協程執行核心的 C++23 模組專案。根模組匯出延遲啟動、單一消費者的
-`mcpplibs::cmp::Task<T>`、結構化變參 `when_all()`、`RunLoop` 及其可複製的 `Scheduler`
-控制代碼。`when_all()` 會啟動並持有多個 Task，直到全部結束。`RunLoop::run()` 是公開根
+`mcpplibs::cmp::Task<T>`、結構化變參/vector `when_all()`、`RunLoop` 及其可複製的
+`Scheduler` 控制代碼。`when_all()` 會啟動並持有多個 Task，直到全部結束。`RunLoop::run()` 是公開根
 任務執行邊界，`Scheduler::schedule()` 用於明確地把暫停協程送回對應執行迴圈。
 `schedule_after()` 和 `schedule_at()` 在沒有計時執行緒的情況下提供相對和絕對的
 `steady_clock` 期限；接受 `std::stop_token` 的多載使這些等待可以協作式取消。
@@ -134,10 +134,11 @@ Task<int> delayed_value(
 }
 
 Task<void> print_concurrent_results(RunLoop::Scheduler scheduler) {
-    auto [first, second] = co_await when_all(
-        delayed_value(scheduler, 10ms, 20),
-        delayed_value(scheduler, 1ms, 22));
-    std::println("Concurrent result: {}", first + second);
+    std::vector<Task<int>> tasks {};
+    tasks.emplace_back(delayed_value(scheduler, 10ms, 20));
+    tasks.emplace_back(delayed_value(scheduler, 1ms, 22));
+    auto values = co_await when_all(std::move(tasks));
+    std::println("Concurrent result: {}", values[0] + values[1]);
     co_return;
 }
 
@@ -190,6 +191,7 @@ int main() {
 - 等待時由左至右啟動輸入，不等待較早暫停的輸入完成；
 - 所有子任務都到達終態後才恢復父任務；
 - 結果依參數順序組成 `std::tuple`，其中 `Task<void>` 對應 `std::monostate`；
+- `std::vector<Task<T>>` 輸入依索引順序產生相同數量的結果 vector；
 - 支援 move-only 結果；
 - 全部子任務結束後，依參數順序重新拋出第一個子任務例外；
 - 原子「計數 + 哨兵」協定保證立即完成和跨執行緒完成只恢復一次；
@@ -258,9 +260,10 @@ cd examples/basic
 mcpp run
 ```
 
-預期結果是函式庫建置成功、三個二進位檔中的 46 項測試全部通過，而且範例依序輸出
+預期結果是函式庫建置成功、三個二進位檔中的 53 項測試全部通過，而且範例依序輸出
 `Coroutine result: 42`、`Concurrent result: 42` 和 `Coroutine cancelled` 後以狀態 0
-結束。測試分別執行一百萬次立即完成的 Task、十萬次立即雙 Task 匯合、十萬次明確排程、
-十萬次立即 Timer 和十萬次預先取消的定時等待，用於檢查對稱轉移以及所有匯合或佇列路徑都
-不會增長原生呼叫堆疊。目前 Windows LLVM 工具鏈不會產生 GNU depfile；如果模組介面包含的
-檔案發生變更，增量建置可能沿用舊的 BMI 或目的檔。完整複驗時使用 `--cache=off`。
+結束。測試分別執行一百萬次立即完成的 Task、十萬次立即雙 Task 變參匯合、五萬次立即雙
+Task vector 匯合、十萬次明確排程、十萬次立即 Timer 和十萬次預先取消的定時等待，用於
+檢查對稱轉移以及所有匯合或佇列路徑都不會增長原生呼叫堆疊。目前 Windows LLVM 工具鏈
+不會產生 GNU depfile；如果模組介面包含的檔案發生變更，增量建置可能沿用舊的 BMI 或
+目的檔。完整複驗時使用 `--cache=off`。

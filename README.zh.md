@@ -16,9 +16,9 @@
 [![ci-windows](https://github.com/mcpplibs/cmp/actions/workflows/ci-windows.yml/badge.svg?branch=main)](https://github.com/mcpplibs/cmp/actions/workflows/ci-windows.yml)
 
 > [!IMPORTANT]
-> CMP 已提供懒启动、单消费者的 `Task<T>` / `Task<void>`、结构化变参汇合 `when_all()`，
-> 以及在调用线程运行、支持显式调度和单调时钟定时调度的 `RunLoop`。定时等待已支持基于
-> `std::stop_token` 的协作式取消；异步 I/O 和 detached 执行尚未实现。
+> CMP 已提供懒启动、单消费者的 `Task<T>` / `Task<void>`、支持变参和 vector 的结构化
+> `when_all()`，以及在调用线程运行、支持显式调度和单调时钟定时调度的 `RunLoop`。定时
+> 等待已支持基于 `std::stop_token` 的协作式取消；异步 I/O 和 detached 执行尚未实现。
 
 CMP 计划基于标准无栈 C++ 协程构建现代协程运行时和库。显式 `co_await` 模型现已覆盖结构化
 并发汇合、调度、单调时钟定时器和可取消定时等待，并将通过经过验证的小步骤继续探索异步
@@ -107,10 +107,11 @@ Task<int> delayed_value(
 }
 
 Task<void> print_concurrent_results(RunLoop::Scheduler scheduler) {
-    auto [first, second] = co_await when_all(
-        delayed_value(scheduler, 10ms, 20),
-        delayed_value(scheduler, 1ms, 22));
-    std::println("Concurrent result: {}", first + second);
+    std::vector<Task<int>> tasks {};
+    tasks.emplace_back(delayed_value(scheduler, 10ms, 20));
+    tasks.emplace_back(delayed_value(scheduler, 1ms, 22));
+    auto values = co_await when_all(std::move(tasks));
+    std::println("Concurrent result: {}", values[0] + values[1]);
     co_return;
 }
 
@@ -142,7 +143,9 @@ continuation 之间直接转移，并通过 RAII 销毁未消费的协程帧。�
 `when_all()` 同样采用懒启动。等待它时会从左到右启动全部输入 Task，不会等待较早挂起的输入
 完成，并持续持有所有子协程帧，直到全部输入结束。结果按参数顺序组成 `std::tuple`；
 `Task<void>` 对应 `std::monostate`。如果子任务失败，仍会先等待全部子任务收尾，再按参数
-顺序重新抛出第一个异常。命名 Task 必须移动到 `when_all()` 中。
+顺序重新抛出第一个异常。命名 Task 必须移动到 `when_all()` 中。运行时数量的同类型任务可以
+作为 `std::vector<Task<T>>` 传入，并按相同索引顺序返回结果 vector；命名输入 vector 同样
+必须移动。
 
 定义协程的翻译单元必须导入 `std`，使编译器能够看到标准协程协议类型。CMP 私有导入
 `std`，不会向使用方重新导出整个标准库。
@@ -204,8 +207,8 @@ CMP 当前不跟踪 `mcpp.lock`，`.gitignore` 明确执行这一仓库约定。
 1. 包身份和可导入模块 bootstrap——已完成；
 2. 协程 task 与生命周期语义——已实现初始 `Task`；
 3. 根任务驱动器和最小单线程调度器——已完成初始实现；
-4. 单调时钟 Timer v1、可取消定时等待和变参结构化汇合——已实现；动态任务作用域、取消传播
-   和更多唤醒路径仍待开发；
+4. 单调时钟 Timer v1、可取消定时等待和变参/vector 结构化汇合——已实现；可变任务作用域、
+   取消传播和更多唤醒路径仍待开发；
 5. 多 worker 调度与 work stealing；
 6. 异步 I/O 集成和 blocking pool。
 

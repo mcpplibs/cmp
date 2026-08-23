@@ -16,9 +16,9 @@
 [![ci-windows](https://github.com/mcpplibs/cmp/actions/workflows/ci-windows.yml/badge.svg?branch=main)](https://github.com/mcpplibs/cmp/actions/workflows/ci-windows.yml)
 
 > [!IMPORTANT]
-> CMP 已提供延遲啟動、單一消費者的 `Task<T>` / `Task<void>`、結構化變參匯合
-> `when_all()`，以及在呼叫執行緒運行、支援明確排程和單調時鐘定時排程的 `RunLoop`。
-> 定時等待已支援基於 `std::stop_token` 的協作式取消；非同步 I/O 和 detached 執行尚未實作。
+> CMP 已提供延遲啟動、單一消費者的 `Task<T>` / `Task<void>`、支援變參和 vector 的結構化
+> `when_all()`，以及在呼叫執行緒運行、支援明確排程和單調時鐘定時排程的 `RunLoop`。定時
+> 等待已支援基於 `std::stop_token` 的協作式取消；非同步 I/O 和 detached 執行尚未實作。
 
 CMP 計畫以標準無堆疊 C++ 協程建構現代協程執行期與函式庫。明確的 `co_await` 模型現已
 涵蓋結構化並行匯合、排程、單調時鐘計時器和可取消定時等待，並將透過經過驗證的小步驟
@@ -107,10 +107,11 @@ Task<int> delayed_value(
 }
 
 Task<void> print_concurrent_results(RunLoop::Scheduler scheduler) {
-    auto [first, second] = co_await when_all(
-        delayed_value(scheduler, 10ms, 20),
-        delayed_value(scheduler, 1ms, 22));
-    std::println("Concurrent result: {}", first + second);
+    std::vector<Task<int>> tasks {};
+    tasks.emplace_back(delayed_value(scheduler, 10ms, 20));
+    tasks.emplace_back(delayed_value(scheduler, 1ms, 22));
+    auto values = co_await when_all(std::move(tasks));
+    std::println("Concurrent result: {}", values[0] + values[1]);
     co_return;
 }
 
@@ -142,7 +143,9 @@ continuation 之間直接轉移，並透過 RAII 銷毀未消費的協程框架�
 `when_all()` 同樣採延遲啟動。等待它時會由左至右啟動全部輸入 Task，不會等待較早暫停的輸入
 完成，並持續持有所有子協程框架，直到全部輸入結束。結果依參數順序組成 `std::tuple`；
 `Task<void>` 對應 `std::monostate`。若子任務失敗，仍會先等待全部子任務收尾，再依參數
-順序重新拋出第一個例外。具名 Task 必須移動到 `when_all()` 中。
+順序重新拋出第一個例外。具名 Task 必須移動到 `when_all()` 中。執行期數量的同型別任務可以
+作為 `std::vector<Task<T>>` 傳入，並依相同索引順序回傳結果 vector；具名輸入 vector 同樣
+必須移動。
 
 定義協程的轉譯單元必須匯入 `std`，使編譯器能夠看到標準協程協定型別。CMP 私下匯入
 `std`，不會向使用端重新匯出整個標準函式庫。
@@ -204,8 +207,8 @@ CMP 目前不追蹤 `mcpp.lock`，`.gitignore` 明確執行這項儲存庫約定
 1. 套件識別與可匯入模組 bootstrap——已完成；
 2. 協程 task 與生命週期語意——已實作初始 `Task`；
 3. 根任務驅動器和最小單執行緒排程器——已完成初始實作；
-4. 單調時鐘 Timer v1、可取消定時等待和變參結構化匯合——已實作；動態任務作用域、取消傳播
-   和更多喚醒路徑仍待開發；
+4. 單調時鐘 Timer v1、可取消定時等待和變參/vector 結構化匯合——已實作；可變任務作用域、
+   取消傳播和更多喚醒路徑仍待開發；
 5. 多 worker 排程與 work stealing；
 6. 非同步 I/O 整合和 blocking pool。
 

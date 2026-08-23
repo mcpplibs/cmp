@@ -1,7 +1,7 @@
 # CMP `when_all` v1 Design
 
 **Date:** 2026-08-24
-**Status:** Implemented; local Dev and Release verified
+**Status:** Implemented; local and Linux/macOS/Windows CI verified; merged by PR #5
 **Base:** `main` at `f3d199c`
 **Branch:** `feature/when-all-v1`
 

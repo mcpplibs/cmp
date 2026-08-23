@@ -14,10 +14,9 @@ LLVM 22.1.8，测试依赖为 `compat.gtest` 1.15.2。实现位于 `src/`，契�
 
 ## 当前目标与状态
 
-当前分支为 `feature/when-all-v1`，基于已与远端同步的 `main` 提交 `f3d199c`。下一模块确定为
-结构化并发汇合 `when_all` v1；设计、实现、契约测试、独立示例和三语公开文档已完成，完整
-Dev/Release 验证和自审通过，提交、推送、PR、CI 与合并尚待完成。此前 Cancellation v1 已
-通过 PR #4 合并，并通过本地与 Linux、macOS、Windows CI 验证。
+当前分支为 `main`，已包含 PR #5 的 squash 合并提交 `d7dd418`，本地与远端已同步。
+结构化并发汇合 `when_all` v1 已完成设计、实现、契约测试、独立示例、三语公开文档、本地
+Dev/Release 验证和三平台 PR CI。远端功能分支保留，下一阶段尚未创建分支。
 
 ## 已完成工作
 
@@ -90,6 +89,8 @@ Dev/Release 验证和自审通过，提交、推送、PR、CI 与合并尚待完
   30 个 RunLoop、8 个 when_all）。
 - Release 的完整 `when_all` 8 项套件额外连续执行 50 次，全部通过。
 - 更新后的独立示例构建运行通过并输出三行预期结果。
+- PR #5 head `d6ea2a8` 的 Linux x86_64、macOS arm64、Windows x86_64 CI 均通过构建、
+  46 项测试和独立示例；已 squash 合并为 `d7dd418`。
 
 ## 已知问题 / 风险
 
@@ -101,13 +102,13 @@ Dev/Release 验证和自审通过，提交、推送、PR、CI 与合并尚待完
   awaiter。
 - pending `when_all` 仍遵循现有 Task 边界：子任务发布 continuation 后，外部提前销毁聚合
   帧属于无效使用。
-- `when_all` v1 尚未完成 Linux、macOS、Windows 三平台 CI 验证。
 
 ## 剩余工作
 
-1. 审查待提交文件和暂存 diff，创建中文本地提交并推送功能分支。
-2. 创建 PR、等待三平台 CI，通过后 squash 合并并同步本地 `main`。
+1. `when_all` v1 没有剩余实现或交付工作。
+2. 下一阶段从最新 `main` 新建分支，独立设计动态结构化任务作用域与取消传播。
 
 ## 推荐下一步
 
-下一步审查完整待提交 diff 后提交并推送，再创建 PR；只有三平台检查全部通过才合并。
+下一步从最新 `main` 创建新分支，先定义动态任务作用域的 close/join 生命周期、异常策略和
+`std::stop_token` 传播边界；不要直接扩展已合并的 `when_all` 分支。

@@ -3,7 +3,7 @@
 **Date:** 2026-08-24
 **Design:** `docs/superpowers/specs/2026-08-24-cmp-when-all-v1-design.md`
 **Branch:** `feature/when-all-v1`
-**Status:** Implementation and local verification complete; remote delivery pending
+**Status:** Implemented and merged by PR #5
 
 ## 1. Lock the public contract with tests
 
@@ -49,3 +49,4 @@
 - The Release `when_all` suite passed 50 consecutive runs.
 - The standalone consumer printed `Coroutine result: 42`, `Concurrent result: 42`, and
   `Coroutine cancelled`, then exited with status 0.
+- PR #5 passed Linux x86_64, macOS arm64, and Windows x86_64 CI before squash merge.

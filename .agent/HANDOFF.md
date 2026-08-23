@@ -4,7 +4,7 @@
 
 CMP 是使用 mcpp 构建的 C++23 Modules 协程运行时库。当前公开核心包括惰性、唯一所有权的
 `Task<T>`，支持变参与同类型动态集合的结构化 `when_all()`，eager 可变结构化 `TaskGroup`，
-单消费者 `RunLoop`，以及可复制的 `RunLoop::Scheduler`。Scheduler 支持普通
+无分配一次性 `OneShotEvent`，单消费者 `RunLoop`，以及可复制的 `RunLoop::Scheduler`。Scheduler 支持普通
 `schedule()`、相对期限 `schedule_after()` 和绝对期限 `schedule_at()`；定时等待可显式接收
 `std::stop_token`，取消获胜时抛出 `OperationCancelled`。由 Scheduler 入队的 continuation
 均由调用 `RunLoop::run()` 的线程恢复。
@@ -15,9 +15,9 @@ LLVM 22.1.8，测试依赖为 `compat.gtest` 1.15.2。实现位于 `src/`，契�
 
 ## 当前目标与状态
 
-当前分支为 `main`，已与远端同步到 PR #7 的 squash 合并提交 `c3883ab`。variadic/vector
-`when_all` 与最小可变结构化 `TaskGroup` 均已完成实现、公开契约测试、独立示例、三语文档和
-三平台交付；合并状态文档更新和最终 main CI 尚待完成。
+当前分支为 `feature/one-shot-event-v1`，基于已与远端同步的 `main` 提交 `a9183fc`。TaskGroup
+v1 已完整合并并通过最终 main CI；当前阶段设计最小一次性协程事件 `OneShotEvent`，设计和
+实施、7 项契约测试、独立示例和三语文档已完成，本地完整验证尚待执行。
 
 ## 已完成工作
 
@@ -55,6 +55,12 @@ LLVM 22.1.8，测试依赖为 `compat.gtest` 1.15.2。实现位于 `src/`，契�
 - 新增 9 项 TaskGroup 契约测试，覆盖 eager/lazy 边界、并发接纳、join 后关闭、异常顺序、
   取消、跨线程发布和 5 万次即时完成栈安全。
 - 独立示例和英文、简体中文、繁体中文 README / 架构文档已同步 TaskGroup v1。
+- 已导出不可移动的 `OneShotEvent`；`co_await event` 无分配注册等待者，首次 `set()` 永久设置
+  事件并在 setter 线程恢复全部等待者，后续 set 幂等。
+- event 使用一个原子 sentinel/list 状态和协程帧内侵入节点，注册/set 竞态不会丢失唤醒；
+  acquire-release 顺序发布 set 前写入。
+- 新增 7 项事件契约测试，覆盖预先 set、多个等待者、setter 线程、1,000 次注册竞态、显式
+  返回 RunLoop 和 5 万等待者栈安全。
 
 ## 重要决策
 
@@ -74,17 +80,21 @@ LLVM 22.1.8，测试依赖为 `compat.gtest` 1.15.2。实现位于 `src/`，契�
   group 在析构时终止进程，避免销毁仍被发布的子协程帧。
 - TaskGroup 取消保持显式：`request_stop()` 不会自动取消不接收 token 的子任务，也不提供
   `cancel_and_join()`、结果 future、scheduler 选择或 completed-wrapper 回收。
+- OneShotEvent 只有单向 unset→set 状态，不提供 reset、代际、取消注销、值或隐式 Scheduler
+  转移；需要复用事件或 channel 时再设计独立状态机。
 
 ## 修改 / 重要文件
 
 - `src/run_loop.cppm`：公开异常、token 重载、取消状态、回调和显式 Timer 堆。
 - `src/when_all.cppm`：join coroutine、原子计数哨兵和 variadic/vector 公开 API。
 - `src/task_group.cppm`：eager void 子任务作用域、单次 join、显式 stop 通道和生命周期状态机。
-- `src/cmp.cppm`：导出 `:when_all` 与 `:task_group` 分区。
+- `src/one_shot_event.cppm`：无分配一次性事件和原子等待者链表。
+- `src/cmp.cppm`：导出 `:when_all`、`:task_group` 与 `:one_shot_event` 分区。
 - `tests/run_loop_test.cpp`：Cancellation v1 契约、边界、竞态和栈安全测试。
 - `tests/when_all_test.cpp`：变参/vector 的结构化所有权、结果、异常、线程和栈安全测试。
 - `tests/task_group_test.cpp`：TaskGroup 接纳、join、异常、取消、线程和栈安全测试。
-- `examples/basic/src/main.cpp`：协程内正常、并发、TaskGroup 和预取消输出示例。
+- `tests/one_shot_event_test.cpp`：事件发布、注册竞态、线程和栈安全测试。
+- `examples/basic/src/main.cpp`：协程内正常、并发、TaskGroup、event 和预取消输出示例。
 - `README.md`、`README.zh.md`、`README.zh.hant.md`：当前 API、示例和路线图。
 - `docs/architecture.md`、`docs/architecture.zh.md`、`docs/architecture.zh.hant.md`：实现契约、
   边界与验证基线。
@@ -96,6 +106,8 @@ LLVM 22.1.8，测试依赖为 `compat.gtest` 1.15.2。实现位于 `src/`，契�
 - `docs/superpowers/plans/2026-08-24-cmp-when-all-range.md`：当前动态集合实施清单。
 - `docs/superpowers/specs/2026-08-24-cmp-task-group-v1-design.md`：当前 TaskGroup v1 设计。
 - `docs/superpowers/plans/2026-08-24-cmp-task-group-v1.md`：当前 TaskGroup v1 实施清单。
+- `docs/superpowers/specs/2026-08-24-cmp-one-shot-event-v1-design.md`：当前 OneShotEvent v1 设计。
+- `docs/superpowers/plans/2026-08-24-cmp-one-shot-event-v1.md`：当前 OneShotEvent v1 实施清单。
 - `.agent/HANDOFF.md`：本文件。
 
 ## 验证情况
@@ -146,7 +158,14 @@ LLVM 22.1.8，测试依赖为 `compat.gtest` 1.15.2。实现位于 `src/`，契�
 - TaskGroup v1 本地实现与验证阶段完成于 2026-08-24 02:14:36 CST。
 - PR #7 head `c074250` 的 Linux x86_64、macOS arm64、Windows x86_64 CI 均通过 62 项测试和
   独立示例；已 squash 合并为 `c3883ab`，功能分支保留。
-- 本地 `main` 已快进同步到 `c3883ab`。
+- 本地与远端 `main` 已同步到交接提交 `a9183fc`；该提交的 Linux run `32657710516`、Windows
+  run `32657710523`、macOS run `32657710496` 均成功。
+- OneShotEvent 新测试先因缺少公开类型按预期编译失败；实现后聚焦 Dev 测试 7/7 通过。
+- 更新后的独立示例运行成功，并在取消输出前增加 `Event signalled`。
+- OneShotEvent 阶段 Dev/Release 严格无缓存构建通过；两个 profile 的完整测试均为 69/69。
+- Release 的完整事件套件额外连续执行 50 轮，覆盖 50,000 次注册/set 竞态；跨线程恢复测试
+  额外连续执行 5,000 轮，全部通过。
+- OneShotEvent v1 本地实现与验证阶段完成于 2026-08-24 02:37:41 CST；尚未提交或触发远端 CI。
 
 ## 已知问题 / 风险
 
@@ -161,13 +180,13 @@ LLVM 22.1.8，测试依赖为 `compat.gtest` 1.15.2。实现位于 `src/`，契�
 - TaskGroup 会保留所有 wrapper 帧至析构，空间复杂度为 O(n)；v1 不为尚无实测需求增加完成后
   回收机制。
 - TaskGroup 遗漏 join 会确定性终止，且取消不会自动注入子任务；这两项均是已记录的公开契约。
+- OneShotEvent 会在带 pending 等待者析构时终止；等待者帧必须存活到 set，v1 不提供取消注销。
 
 ## 剩余工作
 
-1. 提交并推送本次合并状态更新，确认最终 `main` 三平台 CI。
-2. 读取本机时间；未到停止窗口则开始下一模块的独立设计。
+1. 提交、推送并完成 PR 三平台交付与 main 同步。
 
 ## 推荐下一步
 
-下一步先验证合并后的 `main`；随后只设计一个边界清楚的后续模块，不顺带加入 detached、
-隐式取消传播或多 worker 调度。
+下一步完成严格验证并重点复审原子发布、awaiter 销毁边界和 set 内 inline 恢复；不加入 reset、
+取消注销或 scheduler 选择。

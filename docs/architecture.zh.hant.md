@@ -6,15 +6,16 @@
 
 CMP 是一個具備小型協程執行核心的 C++23 模組專案。根模組匯出延遲啟動、單一消費者的
 `mcpplibs::cmp::Task<T>`、結構化變參/vector `when_all()`、eager `TaskGroup`、`RunLoop` 及其
-可複製的 `Scheduler` 控制代碼。匯合原語會持有每個子任務直到結束。`RunLoop::run()` 是公開
-根任務執行邊界，`Scheduler::schedule()` 用於明確地把暫停協程送回對應執行迴圈。
+可複製的 `Scheduler` 控制代碼和無分配 `OneShotEvent`。匯合原語會持有每個子任務直到結束，
+一次性事件負責發布一個外部訊號。`RunLoop::run()` 是公開根任務執行邊界，
+`Scheduler::schedule()` 用於明確地把暫停協程送回對應執行迴圈。
 `schedule_after()` 和 `schedule_at()` 在沒有計時執行緒的情況下提供相對和絕對的
 `steady_clock` 期限；接受 `std::stop_token` 的多載使這些等待可以協作式取消。
 
 儲存庫現有內容包括：
 
 - 一份 mcpp 套件清單；
-- 根模組 `mcpplibs.cmp` 及 Task、RunLoop、`when_all`、TaskGroup 模組分割區；
+- 根模組 `mcpplibs.cmp` 及 Task、RunLoop、`when_all`、TaskGroup、event 模組分割區；
 - 涵蓋契約、生命週期、例外、排程和執行緒行為的 gtest 測試；
 - 一個透過路徑相依使用根套件的獨立範例；
 - Linux、macOS 和 Windows 三套 CI 工作流程。
@@ -63,19 +64,21 @@ mcpp 套件由 `mcpplibs` 和 `cmp` 共同識別。使用端在 `[dependencies.m
 │   ├── task.cppm
 │   ├── run_loop.cppm
 │   ├── when_all.cppm
-│   └── task_group.cppm
+│   ├── task_group.cppm
+│   └── one_shot_event.cppm
 ├── tests/
 │   ├── cmp_test.cpp
 │   ├── run_loop_test.cpp
 │   ├── when_all_test.cpp
-│   └── task_group_test.cpp
+│   ├── task_group_test.cpp
+│   └── one_shot_event_test.cpp
 └── mcpp.toml
 ```
 
 ## 建置與測試
 
 `.xlings.json` 固定專案使用的 mcpp 版本。`mcpp build` 建置自動推斷的函式庫目標。
-`mcpp test` 會找到四個測試檔案，並為每個檔案連結 gtest 進入點。測試同時驗證 Task 所有權
+`mcpp test` 會找到五個測試檔案，並為每個檔案連結 gtest 進入點。測試同時驗證 Task 所有權
 和對稱轉移、結構化匯合，以及根任務執行、普通與定時排程、例外傳播、跨執行緒期限喚醒、
 無效 Scheduler、取消競態、RunLoop 重複使用和不會增長呼叫堆疊的重複完成。
 
@@ -112,6 +115,7 @@ import mcpplibs.cmp;
 using mcpplibs::cmp::Task;
 using mcpplibs::cmp::RunLoop;
 using mcpplibs::cmp::OperationCancelled;
+using mcpplibs::cmp::OneShotEvent;
 using mcpplibs::cmp::TaskGroup;
 using mcpplibs::cmp::when_all;
 
@@ -165,6 +169,22 @@ Task<void> print_task_group(RunLoop::Scheduler scheduler) {
     co_return;
 }
 
+Task<void> set_event(RunLoop::Scheduler scheduler, OneShotEvent& event) {
+    co_await scheduler.schedule();
+    event.set();
+    co_return;
+}
+
+Task<void> print_event(RunLoop::Scheduler scheduler) {
+    OneShotEvent event {};
+    TaskGroup group {};
+    group.spawn(set_event(scheduler, event));
+    co_await event;
+    co_await group.join();
+    std::println("Event signalled");
+    co_return;
+}
+
 Task<void> print_cancellation(RunLoop::Scheduler scheduler, std::stop_token token) {
     try {
         co_await scheduler.schedule_after(1s, token);
@@ -179,6 +199,7 @@ int main() {
     loop.run(print_answer(loop.get_scheduler()));
     loop.run(print_concurrent_results(loop.get_scheduler()));
     loop.run(print_task_group(loop.get_scheduler()));
+    loop.run(print_event(loop.get_scheduler()));
 
     std::stop_source source {};
     source.request_stop();
@@ -190,8 +211,8 @@ int main() {
 驅動器。RunLoop 在主執行緒驅動 `print_answer()`；短單調時鐘計時器到期後，協程輸出
 `Coroutine result: 42`。下一個根任務並行匯合兩個定時結果並輸出
 `Concurrent result: 42`。隨後一個協程 eager 啟動並匯合兩個 void Task，再輸出
-`Task group result: 42`。最後一個協程從預先取消的定時等待捕捉 `OperationCancelled`，並輸出
-`Coroutine cancelled`。
+`Task group result: 42`。另一個協程等待一次性訊號並輸出 `Event signalled`。最後一個協程從
+預先取消的定時等待捕捉 `OperationCancelled`，並輸出 `Coroutine cancelled`。
 
 任何定義協程的轉譯單元都要自行匯入 `std`，使 `std::coroutine_traits` 和標準協程協定型別
 參與編譯。CMP 模組私下匯入 `std`，而不是向使用端重新匯出整個標準函式庫。
@@ -231,6 +252,16 @@ int main() {
 - group 不可移動，解構時必須未使用或已經 join，否則終止程序；
 - `get_stop_token()` 和 `request_stop()` 提供明確的標準取消通道，但不會向 Task 注入 token；
 - 最後一個子任務在其完成執行緒恢復 join，不隱式增加排程器親和。
+
+`OneShotEvent` 遵循以下契約：
+
+- 預設事件未 set，可由多個協程無分配地等待；
+- 第一次 `set()` 永久設定事件，並恰好恢復所有已註冊等待者一次；
+- 註冊與 set 競態時，等待者要麼進入恢復鏈結串列，要麼觀察到 set 狀態；
+- set 前的寫入透過 acquire-release 順序發布給等待者；
+- 等待者依未指定順序在 setter 執行緒 inline 恢復；
+- 事件不可移動且必須比所有等待者活得更久；帶 pending 等待者解構會終止程序；
+- 不提供 reset、可取消註銷、值或隱式 Scheduler 轉移。
 
 `RunLoop` 和 `Scheduler` 遵循以下契約：
 
@@ -275,14 +306,14 @@ CMP 名稱中的 `C` 與 Go 執行期中的 `G` 相呼應，但這只說明命�
 以下方向可以分別設計和審查，目前都不是套件的既有約定：
 
 1. 遞迴作用域接納、結果控制代碼和更廣泛的取消傳播；
-2. 更多結構化喚醒路徑；
+2. 可複用事件、channel 和更多結構化喚醒路徑；
 3. 多工作執行緒排程和工作竊取；
 4. 非同步 I/O 整合；
 5. 處理無法避免之阻塞工作的專用執行緒池；
 6. 結果適配器和可選的協程框架配置策略。
 
-Task、RunLoop、`when_all` 與 TaskGroup 已形成真實的公開邊界，因此分別位於模組分割區中。
-只有其他已實作 API 確實需要新邊界時，才繼續增加模組分割區或實作單元。
+Task、RunLoop、`when_all`、TaskGroup 與 OneShotEvent 已形成真實的公開邊界，因此分別位於
+模組分割區中。只有其他已實作 API 確實需要新邊界時，才繼續增加模組分割區或實作單元。
 
 ## 驗證
 
@@ -295,10 +326,11 @@ cd examples/basic
 mcpp run
 ```
 
-預期結果是函式庫建置成功、四個二進位檔中的 62 項測試全部通過，而且範例依序輸出
-`Coroutine result: 42`、`Concurrent result: 42`、`Task group result: 42` 和
-`Coroutine cancelled` 後以狀態 0 結束。測試分別執行一百萬次立即完成的 Task、十萬次立即
-雙 Task 變參匯合、五萬次立即雙 Task vector 匯合、五萬次 eager TaskGroup 完成、十萬次明確
+預期結果是函式庫建置成功、五個二進位檔中的 69 項測試全部通過，而且範例依序輸出
+`Coroutine result: 42`、`Concurrent result: 42`、`Task group result: 42`、
+`Event signalled` 和 `Coroutine cancelled` 後以狀態 0 結束。測試分別執行一百萬次立即完成
+的 Task、十萬次立即雙 Task 變參匯合、五萬次立即雙 Task vector 匯合、五萬次 eager TaskGroup
+完成、五萬次事件等待者、十萬次明確
 排程、十萬次立即 Timer 和十萬次預先取消的定時等待，用於檢查對稱轉移以及所有匯合或佇列
 路徑都不會增長原生呼叫堆疊。目前 Windows LLVM 工具鏈
 不會產生 GNU depfile；如果模組介面包含的檔案發生變更，增量建置可能沿用舊的 BMI 或

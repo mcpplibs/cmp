@@ -17,14 +17,14 @@
 
 > [!IMPORTANT]
 > CMP provides a lazy, single-consumer `Task<T>` / `Task<void>`, structured variadic and vector
-> `when_all()`, and a caller-thread `RunLoop` with explicit and monotonic timed scheduling. Timed
-> waits support cooperative cancellation with `std::stop_token`; asynchronous I/O and detached
-> execution are not implemented.
+> `when_all()`, an eager structured `TaskGroup`, and a caller-thread `RunLoop` with explicit and
+> monotonic timed scheduling. Timed waits and TaskGroup children can use explicit cooperative
+> cancellation with `std::stop_token`; asynchronous I/O and detached execution are not implemented.
 
 CMP is being built as a modern coroutine runtime and library on standard stackless C++
-coroutines. Its explicit `co_await` model now covers structured concurrent joins, scheduling,
-monotonic timers, and cancellable timed waits and can grow, in small verified steps, toward
-asynchronous I/O and safe handling of blocking work.
+coroutines. Its explicit `co_await` model now covers fixed and incremental structured concurrency,
+scheduling, monotonic timers, and cancellable timed waits and can grow, in small verified steps,
+toward asynchronous I/O and safe handling of blocking work.
 
 ## Why CMP?
 
@@ -74,10 +74,10 @@ mcpp run
 ```
 
 The example prints `Coroutine result: 42`, joins two timed Tasks and prints
-`Concurrent result: 42`, then prints `Coroutine cancelled` from a pre-cancelled timed wait. All
-messages come from `Task<void>` coroutines. It proves that an independent mcpp package can import
-`mcpplibs.cmp`, compose and join Tasks, and use timed scheduling and cancellation through the
-public RunLoop.
+`Concurrent result: 42`, eagerly spawns two scoped Tasks and prints `Task group result: 42`, then
+prints `Coroutine cancelled` from a pre-cancelled timed wait. All messages come from `Task<void>`
+coroutines. It proves that an independent mcpp package can import `mcpplibs.cmp`, compose, spawn,
+and join Tasks, and use timed scheduling and cancellation through the public RunLoop.
 
 ## Current API
 
@@ -88,6 +88,7 @@ import mcpplibs.cmp;
 using mcpplibs::cmp::Task;
 using mcpplibs::cmp::RunLoop;
 using mcpplibs::cmp::OperationCancelled;
+using mcpplibs::cmp::TaskGroup;
 using mcpplibs::cmp::when_all;
 
 using namespace std::chrono_literals;
@@ -120,6 +121,26 @@ Task<void> print_concurrent_results(RunLoop::Scheduler scheduler) {
     co_return;
 }
 
+Task<void> add_delayed(
+    RunLoop::Scheduler scheduler,
+    std::chrono::milliseconds delay,
+    int value,
+    int& total) {
+    co_await scheduler.schedule_after(delay);
+    total += value;
+    co_return;
+}
+
+Task<void> print_task_group(RunLoop::Scheduler scheduler) {
+    int total { 0 };
+    TaskGroup group {};
+    group.spawn(add_delayed(scheduler, 10ms, 20, total));
+    group.spawn(add_delayed(scheduler, 1ms, 22, total));
+    co_await group.join();
+    std::println("Task group result: {}", total);
+    co_return;
+}
+
 Task<void> print_cancellation(RunLoop::Scheduler scheduler, std::stop_token token) {
     try {
         co_await scheduler.schedule_after(1s, token);
@@ -133,6 +154,7 @@ int main() {
     RunLoop loop {};
     loop.run(print_answer(loop.get_scheduler()));
     loop.run(print_concurrent_results(loop.get_scheduler()));
+    loop.run(print_task_group(loop.get_scheduler()));
 
     std::stop_source source {};
     source.request_stop();
@@ -153,6 +175,13 @@ Results are returned in parameter order as a `std::tuple`; `Task<void>` contribu
 parameter order is rethrown. Named Tasks must be moved into `when_all()`. A runtime-sized,
 homogeneous collection can be passed as `std::vector<Task<T>>`; it returns a result vector in the
 same index order, and a named input vector must also be moved.
+
+`TaskGroup::spawn()` takes ownership of a `Task<void>` and starts it immediately. Awaiting the
+single-use `join()` closes admission and waits for every accepted child before rethrowing the first
+exception in admission order. The group must be joined before destruction. `get_stop_token()` and
+`request_stop()` provide one explicit standard cancellation channel; the token is not injected
+automatically, so developers pass it to children that support cancellation. Use `when_all()` when
+child results must be returned.
 
 A translation unit that defines a coroutine must import `std` so the compiler can see the standard
 coroutine protocol types. CMP imports `std` privately and does not re-export the whole standard
@@ -186,9 +215,11 @@ await the desired Scheduler to return to its RunLoop.
 ├── src/task.cppm             # Task module partition
 ├── src/run_loop.cppm         # RunLoop and Scheduler partition
 ├── src/when_all.cppm         # structured concurrent Task join
+├── src/task_group.cppm       # eager mutable structured Task scope
 ├── tests/cmp_test.cpp        # Task contract and lifetime tests
 ├── tests/run_loop_test.cpp   # scheduler, boundary, and threading tests
 ├── tests/when_all_test.cpp   # join ownership, result, and race tests
+├── tests/task_group_test.cpp # mutable scope lifetime and race tests
 ├── examples/basic/           # standalone path-dependency consumer
 ├── docs/architecture.md      # current structure, boundaries, and evolution
 └── .github/workflows/        # Linux, macOS, and Windows CI
@@ -221,8 +252,9 @@ Runtime work is split into independently reviewable phases:
 1. package identity and importable-module bootstrap — implemented;
 2. coroutine task and lifetime semantics — initial `Task` implemented;
 3. a root runner and minimal single-thread scheduler — initially implemented;
-4. monotonic Timer v1, cancellable timed waits, and variadic/vector structured joins — implemented;
-   mutable task scopes, cancellation propagation, and more wake-up paths remain;
+4. monotonic Timer v1, cancellable timed waits, variadic/vector joins, and TaskGroup v1 —
+   implemented; recursive scope admission, broader cancellation propagation, and more wake-up
+   paths remain;
 5. multi-worker scheduling and work stealing;
 6. asynchronous I/O integration and a blocking pool.
 

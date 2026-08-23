@@ -3,7 +3,7 @@
 **Date:** 2026-08-24
 **Design:** `docs/superpowers/specs/2026-08-24-cmp-task-group-v1-design.md`
 **Branch:** `feature/task-group-v1`
-**Status:** Implemented; local verification complete, delivery pending
+**Status:** Complete; merged via PR #7
 
 ## 1. Add failing public-contract tests
 
@@ -38,9 +38,10 @@ architecture languages describe the same API and boundaries.
 
 ## 4. Verify and deliver
 
-**In progress.** Strict cache-off Dev and Release builds and 62/62 tests pass. The Release
-TaskGroup suite passes 50/50 repeats, cross-thread completion 5,000/5,000, and concurrent admission
-1,000/1,000. Commit, PR, three-platform CI, merge, and main synchronization remain.
+**Complete.** Strict cache-off Dev and Release builds and 62/62 tests pass. The Release TaskGroup
+suite passes 50/50 repeats, cross-thread completion 5,000/5,000, and concurrent admission
+1,000/1,000. PR #7 passed Linux, macOS, and Windows CI and was squash-merged as `c3883ab`; local
+`main` is synchronized.
 
 - Run strict cache-off Dev and Release builds and all tests.
 - Repeat focused Release and cross-thread suites and self-review allocation, destruction, lock, and

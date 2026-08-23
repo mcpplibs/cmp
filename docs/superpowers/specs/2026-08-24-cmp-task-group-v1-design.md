@@ -1,7 +1,7 @@
 # CMP TaskGroup v1 Design
 
 **Date:** 2026-08-24
-**Status:** Implemented; local verification complete, delivery pending
+**Status:** Implemented and merged via PR #7
 **Base:** `main` at `4467ab0`
 **Branch:** `feature/task-group-v1`
 

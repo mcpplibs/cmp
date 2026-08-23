@@ -15,9 +15,9 @@ LLVM 22.1.8，测试依赖为 `compat.gtest` 1.15.2。实现位于 `src/`，契�
 
 ## 当前目标与状态
 
-当前分支为 `feature/task-group-v1`，基于已与远端同步的 `main` 提交 `4467ab0`。variadic 与
-vector `when_all` 均已合并；最小可变结构化任务作用域 `TaskGroup` 已完成实现、公开契约测试、
-独立示例、三语文档和本地严格验证，尚未提交或推送。
+当前分支为 `main`，已与远端同步到 PR #7 的 squash 合并提交 `c3883ab`。variadic/vector
+`when_all` 与最小可变结构化 `TaskGroup` 均已完成实现、公开契约测试、独立示例、三语文档和
+三平台交付；合并状态文档更新和最终 main CI 尚待完成。
 
 ## 已完成工作
 
@@ -143,7 +143,10 @@ vector `when_all` 均已合并；最小可变结构化任务作用域 `TaskGroup
   1,000 轮，全部通过。
 - 更新后的独立示例运行成功，依次输出 `Coroutine result: 42`、`Concurrent result: 42`、
   `Task group result: 42` 和 `Coroutine cancelled`。
-- TaskGroup v1 本地实现与验证阶段完成于 2026-08-24 02:14:36 CST；尚未提交或触发远端 CI。
+- TaskGroup v1 本地实现与验证阶段完成于 2026-08-24 02:14:36 CST。
+- PR #7 head `c074250` 的 Linux x86_64、macOS arm64、Windows x86_64 CI 均通过 62 项测试和
+  独立示例；已 squash 合并为 `c3883ab`，功能分支保留。
+- 本地 `main` 已快进同步到 `c3883ab`。
 
 ## 已知问题 / 风险
 
@@ -161,10 +164,10 @@ vector `when_all` 均已合并；最小可变结构化任务作用域 `TaskGroup
 
 ## 剩余工作
 
-1. 提交并推送 `feature/task-group-v1`，创建 PR，等待 Linux、macOS、Windows CI 全绿后合并。
-2. 同步本地 `main`，更新交接状态并验证最终 main CI。
+1. 提交并推送本次合并状态更新，确认最终 `main` 三平台 CI。
+2. 读取本机时间；未到停止窗口则开始下一模块的独立设计。
 
 ## 推荐下一步
 
-下一步提交当前 TaskGroup v1 阶段并完成三平台 PR 交付；不要加入 detached、结果 future 或
-递归 shutdown admission。
+下一步先验证合并后的 `main`；随后只设计一个边界清楚的后续模块，不顺带加入 detached、
+隐式取消传播或多 worker 调度。

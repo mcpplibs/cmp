@@ -17,8 +17,8 @@
 
 > [!IMPORTANT]
 > CMP 已提供懒启动、单消费者的 `Task<T>` / `Task<void>`、支持变参和 vector 的结构化
-> `when_all()`、eager 结构化 `TaskGroup`、单向 `OneShotEvent`，以及在调用线程运行、支持显式
-> 调度和单调时钟定时调度的 `RunLoop`。定时等待和 TaskGroup 子任务可显式使用基于
+> `when_all()`、eager 结构化 `TaskGroup`、单向 `OneShotEvent`、RAII `AsyncMutex`，以及在调用
+> 线程运行、支持显式调度和单调时钟定时调度的 `RunLoop`。定时等待和 TaskGroup 子任务可显式使用基于
 > `std::stop_token` 的协作式取消；异步 I/O 和 detached 执行尚未实现。
 
 CMP 计划基于标准无栈 C++ 协程构建现代协程运行时和库。显式 `co_await` 模型现已覆盖固定与
@@ -73,7 +73,7 @@ mcpp run
 示例会打印 `Coroutine result: 42`，汇合两个定时 Task 后打印 `Concurrent result: 42`，
 eager 启动两个作用域 Task 后打印 `Task group result: 42`，等待一次性通知后打印
 `Event signalled`，最后从预先取消的定时等待打印 `Coroutine cancelled`；所有输出都在
-`Task<void>` 协程内部。
+`Task<void>` 协程内部。两个受保护 Task 还会打印 `Mutex result: 42`。
 
 ## 当前 API
 
@@ -83,6 +83,7 @@ import mcpplibs.cmp;
 
 using mcpplibs::cmp::Task;
 using mcpplibs::cmp::RunLoop;
+using mcpplibs::cmp::AsyncMutex;
 using mcpplibs::cmp::OperationCancelled;
 using mcpplibs::cmp::OneShotEvent;
 using mcpplibs::cmp::TaskGroup;
@@ -154,6 +155,28 @@ Task<void> print_event(RunLoop::Scheduler scheduler) {
     co_return;
 }
 
+Task<void> add_locked(
+    RunLoop::Scheduler scheduler,
+    AsyncMutex& mutex,
+    int value,
+    int& total) {
+    co_await scheduler.schedule();
+    auto guard = co_await mutex.lock_async();
+    total += value;
+    co_return;
+}
+
+Task<void> print_mutex(RunLoop::Scheduler scheduler) {
+    int total { 0 };
+    AsyncMutex mutex {};
+    TaskGroup group {};
+    group.spawn(add_locked(scheduler, mutex, 20, total));
+    group.spawn(add_locked(scheduler, mutex, 22, total));
+    co_await group.join();
+    std::println("Mutex result: {}", total);
+    co_return;
+}
+
 Task<void> print_cancellation(RunLoop::Scheduler scheduler, std::stop_token token) {
     try {
         co_await scheduler.schedule_after(1s, token);
@@ -169,6 +192,7 @@ int main() {
     loop.run(print_concurrent_results(loop.get_scheduler()));
     loop.run(print_task_group(loop.get_scheduler()));
     loop.run(print_event(loop.get_scheduler()));
+    loop.run(print_mutex(loop.get_scheduler()));
 
     std::stop_source source {};
     source.request_stop();
@@ -196,6 +220,10 @@ continuation 之间直接转移，并通过 RAII 销毁未消费的协程帧。�
 在未 set 的 `OneShotEvent` 上执行 `co_await event` 会无分配地挂起。第一次线程安全的 `set()`
 会永久设置事件，并在 setter 线程恰好恢复每个已注册等待者一次；后续等待 inline 继续，后续
 set 不做任何事。事件不可移动且必须比等待者活得更久；v1 不提供 reset 或隐式 Scheduler 转移。
+
+`auto guard = co_await mutex.lock_async()` 无分配地取得 `AsyncMutex`，并通过 RAII 释放。竞争等待者
+按 FIFO 顺序取得所有权并在释放线程恢复；所有权不绑定线程。mutex 必须比所有 Guard 和排队
+等待者活得更久。v1 不提供手工 unlock、try-lock、取消或隐式 Scheduler 转移。
 
 定义协程的翻译单元必须导入 `std`，使编译器能够看到标准协程协议类型。CMP 私有导入
 `std`，不会向使用方重新导出整个标准库。
@@ -226,11 +254,13 @@ RunLoop 不是后台线程，也不会把阻塞代码自动变成异步代码。
 ├── src/when_all.cppm         # 结构化并发 Task 汇合
 ├── src/task_group.cppm       # eager 可变结构化 Task 作用域
 ├── src/one_shot_event.cppm   # 无分配一次性通知
+├── src/async_mutex.cppm      # FIFO 协程感知 RAII 互斥锁
 ├── tests/cmp_test.cpp        # Task 契约和生命周期测试
 ├── tests/run_loop_test.cpp   # 调度、边界和线程测试
 ├── tests/when_all_test.cpp   # 汇合所有权、结果和竞态测试
 ├── tests/task_group_test.cpp # 可变作用域生命周期和竞态测试
 ├── tests/one_shot_event_test.cpp # 事件发布和竞态测试
+├── tests/async_mutex_test.cpp # mutex 所有权和交接测试
 ├── examples/basic/           # 独立的路径依赖 consumer
 ├── docs/architecture.zh.md   # 当前结构、边界和演进方向
 └── .github/workflows/        # Linux、macOS 和 Windows CI
@@ -261,8 +291,8 @@ CMP 当前不跟踪 `mcpp.lock`，`.gitignore` 明确执行这一仓库约定。
 1. 包身份和可导入模块 bootstrap——已完成；
 2. 协程 task 与生命周期语义——已实现初始 `Task`；
 3. 根任务驱动器和最小单线程调度器——已完成初始实现；
-4. 单调时钟 Timer v1、可取消定时等待、变参/vector 汇合、TaskGroup v1 和 OneShotEvent v1
-   ——已实现；递归作用域接纳、更广泛的取消传播和可复用唤醒路径仍待开发；
+4. 单调时钟 Timer v1、可取消定时等待、变参/vector 汇合、TaskGroup v1、OneShotEvent v1 和
+   AsyncMutex v1——已实现；递归作用域接纳、更广泛的取消传播和可复用唤醒路径仍待开发；
 5. 多 worker 调度与 work stealing；
 6. 异步 I/O 集成和 blocking pool。
 

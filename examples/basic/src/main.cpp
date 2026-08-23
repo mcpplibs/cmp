@@ -3,6 +3,7 @@ import mcpplibs.cmp;
 
 using mcpplibs::cmp::Task;
 using mcpplibs::cmp::RunLoop;
+using mcpplibs::cmp::AsyncMutex;
 using mcpplibs::cmp::OperationCancelled;
 using mcpplibs::cmp::OneShotEvent;
 using mcpplibs::cmp::TaskGroup;
@@ -76,6 +77,28 @@ Task<void> print_event(RunLoop::Scheduler scheduler) {
     co_return;
 }
 
+Task<void> add_locked(
+    RunLoop::Scheduler scheduler,
+    AsyncMutex& mutex,
+    int value,
+    int& total) {
+    co_await scheduler.schedule();
+    auto guard = co_await mutex.lock_async();
+    total += value;
+    co_return;
+}
+
+Task<void> print_mutex(RunLoop::Scheduler scheduler) {
+    int total { 0 };
+    AsyncMutex mutex {};
+    TaskGroup group {};
+    group.spawn(add_locked(scheduler, mutex, 20, total));
+    group.spawn(add_locked(scheduler, mutex, 22, total));
+    co_await group.join();
+    std::println("Mutex result: {}", total);
+    co_return;
+}
+
 Task<void> print_cancellation(RunLoop::Scheduler scheduler, std::stop_token token) {
     try {
         co_await scheduler.schedule_after(1s, token);
@@ -91,6 +114,7 @@ int main() {
     loop.run(print_concurrent_results(loop.get_scheduler()));
     loop.run(print_task_group(loop.get_scheduler()));
     loop.run(print_event(loop.get_scheduler()));
+    loop.run(print_mutex(loop.get_scheduler()));
 
     std::stop_source source {};
     source.request_stop();

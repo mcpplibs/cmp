@@ -6,7 +6,7 @@
 
 CMP 是一個具備小型協程執行核心的 C++23 模組專案。根模組匯出延遲啟動、單一消費者的
 `mcpplibs::cmp::Task<T>`、結構化變參/vector `when_all()`、eager `TaskGroup`、`RunLoop` 及其
-可複製的 `Scheduler` 控制代碼和無分配 `OneShotEvent`。匯合原語會持有每個子任務直到結束，
+可複製的 `Scheduler` 控制代碼、無分配 `OneShotEvent` 和 RAII `AsyncMutex`。匯合原語會持有每個子任務直到結束，
 一次性事件負責發布一個外部訊號。`RunLoop::run()` 是公開根任務執行邊界，
 `Scheduler::schedule()` 用於明確地把暫停協程送回對應執行迴圈。
 `schedule_after()` 和 `schedule_at()` 在沒有計時執行緒的情況下提供相對和絕對的
@@ -15,7 +15,7 @@ CMP 是一個具備小型協程執行核心的 C++23 模組專案。根模組匯
 儲存庫現有內容包括：
 
 - 一份 mcpp 套件清單；
-- 根模組 `mcpplibs.cmp` 及 Task、RunLoop、`when_all`、TaskGroup、event 模組分割區；
+- 根模組 `mcpplibs.cmp` 及 Task、RunLoop、join、event、mutex 模組分割區；
 - 涵蓋契約、生命週期、例外、排程和執行緒行為的 gtest 測試；
 - 一個透過路徑相依使用根套件的獨立範例；
 - Linux、macOS 和 Windows 三套 CI 工作流程。
@@ -65,20 +65,22 @@ mcpp 套件由 `mcpplibs` 和 `cmp` 共同識別。使用端在 `[dependencies.m
 │   ├── run_loop.cppm
 │   ├── when_all.cppm
 │   ├── task_group.cppm
-│   └── one_shot_event.cppm
+│   ├── one_shot_event.cppm
+│   └── async_mutex.cppm
 ├── tests/
 │   ├── cmp_test.cpp
 │   ├── run_loop_test.cpp
 │   ├── when_all_test.cpp
 │   ├── task_group_test.cpp
-│   └── one_shot_event_test.cpp
+│   ├── one_shot_event_test.cpp
+│   └── async_mutex_test.cpp
 └── mcpp.toml
 ```
 
 ## 建置與測試
 
 `.xlings.json` 固定專案使用的 mcpp 版本。`mcpp build` 建置自動推斷的函式庫目標。
-`mcpp test` 會找到五個測試檔案，並為每個檔案連結 gtest 進入點。測試同時驗證 Task 所有權
+`mcpp test` 會找到六個測試檔案，並為每個檔案連結 gtest 進入點。測試同時驗證 Task 所有權
 和對稱轉移、結構化匯合，以及根任務執行、普通與定時排程、例外傳播、跨執行緒期限喚醒、
 無效 Scheduler、取消競態、RunLoop 重複使用和不會增長呼叫堆疊的重複完成。
 
@@ -114,6 +116,7 @@ import mcpplibs.cmp;
 
 using mcpplibs::cmp::Task;
 using mcpplibs::cmp::RunLoop;
+using mcpplibs::cmp::AsyncMutex;
 using mcpplibs::cmp::OperationCancelled;
 using mcpplibs::cmp::OneShotEvent;
 using mcpplibs::cmp::TaskGroup;
@@ -185,6 +188,28 @@ Task<void> print_event(RunLoop::Scheduler scheduler) {
     co_return;
 }
 
+Task<void> add_locked(
+    RunLoop::Scheduler scheduler,
+    AsyncMutex& mutex,
+    int value,
+    int& total) {
+    co_await scheduler.schedule();
+    auto guard = co_await mutex.lock_async();
+    total += value;
+    co_return;
+}
+
+Task<void> print_mutex(RunLoop::Scheduler scheduler) {
+    int total { 0 };
+    AsyncMutex mutex {};
+    TaskGroup group {};
+    group.spawn(add_locked(scheduler, mutex, 20, total));
+    group.spawn(add_locked(scheduler, mutex, 22, total));
+    co_await group.join();
+    std::println("Mutex result: {}", total);
+    co_return;
+}
+
 Task<void> print_cancellation(RunLoop::Scheduler scheduler, std::stop_token token) {
     try {
         co_await scheduler.schedule_after(1s, token);
@@ -200,6 +225,7 @@ int main() {
     loop.run(print_concurrent_results(loop.get_scheduler()));
     loop.run(print_task_group(loop.get_scheduler()));
     loop.run(print_event(loop.get_scheduler()));
+    loop.run(print_mutex(loop.get_scheduler()));
 
     std::stop_source source {};
     source.request_stop();
@@ -213,6 +239,8 @@ int main() {
 `Concurrent result: 42`。隨後一個協程 eager 啟動並匯合兩個 void Task，再輸出
 `Task group result: 42`。另一個協程等待一次性訊號並輸出 `Event signalled`。最後一個協程從
 預先取消的定時等待捕捉 `OperationCancelled`，並輸出 `Coroutine cancelled`。
+
+兩個受保護 Task 另會輸出 `Mutex result: 42`。
 
 任何定義協程的轉譯單元都要自行匯入 `std`，使 `std::coroutine_traits` 和標準協程協定型別
 參與編譯。CMP 模組私下匯入 `std`，而不是向使用端重新匯出整個標準函式庫。
@@ -263,6 +291,15 @@ int main() {
 - 事件不可移動且必須比所有等待者活得更久；帶 pending 等待者解構會終止程序；
 - 不提供 reset、可取消註銷、值或隱式 Scheduler 轉移。
 
+`AsyncMutex` 遵循以下契約：
+
+- `lock_async()` 傳回無分配操作，等待結果是 move-only RAII Guard；
+- 立即取得者 inline 繼續，競爭等待者依 FIFO 順序暫停；
+- Guard 解構恰好交接一次所有權，並在該執行緒恢復下一個等待者；
+- 所有權不綁定執行緒，內部狀態鎖不會在恢復使用者協程時持有；
+- mutex 必須比所有 Guard 和等待者活得更久；持有或排隊時解構會終止；
+- 不提供手工 unlock、try-lock、取消、遞迴或隱式 Scheduler 轉移。
+
 `RunLoop` 和 `Scheduler` 遵循以下契約：
 
 - RunLoop 既不能複製也不能移動；它的身分是所有關聯 Scheduler 的生命週期錨點；
@@ -312,7 +349,7 @@ CMP 名稱中的 `C` 與 Go 執行期中的 `G` 相呼應，但這只說明命�
 5. 處理無法避免之阻塞工作的專用執行緒池；
 6. 結果適配器和可選的協程框架配置策略。
 
-Task、RunLoop、`when_all`、TaskGroup 與 OneShotEvent 已形成真實的公開邊界，因此分別位於
+Task、RunLoop、`when_all`、TaskGroup、OneShotEvent 與 AsyncMutex 已形成真實的公開邊界，因此分別位於
 模組分割區中。只有其他已實作 API 確實需要新邊界時，才繼續增加模組分割區或實作單元。
 
 ## 驗證
@@ -326,11 +363,11 @@ cd examples/basic
 mcpp run
 ```
 
-預期結果是函式庫建置成功、五個二進位檔中的 69 項測試全部通過，而且範例依序輸出
+預期結果是函式庫建置成功、六個二進位檔中的 74 項測試全部通過，而且範例依序輸出
 `Coroutine result: 42`、`Concurrent result: 42`、`Task group result: 42`、
-`Event signalled` 和 `Coroutine cancelled` 後以狀態 0 結束。測試分別執行一百萬次立即完成
+`Event signalled`、`Mutex result: 42` 和 `Coroutine cancelled` 後以狀態 0 結束。測試分別執行一百萬次立即完成
 的 Task、十萬次立即雙 Task 變參匯合、五萬次立即雙 Task vector 匯合、五萬次 eager TaskGroup
-完成、五萬次事件等待者、十萬次明確
+完成、五萬次事件等待者、五萬次 mutex 交接、十萬次明確
 排程、十萬次立即 Timer 和十萬次預先取消的定時等待，用於檢查對稱轉移以及所有匯合或佇列
 路徑都不會增長原生呼叫堆疊。目前 Windows LLVM 工具鏈
 不會產生 GNU depfile；如果模組介面包含的檔案發生變更，增量建置可能沿用舊的 BMI 或

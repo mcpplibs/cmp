@@ -1,7 +1,7 @@
 # CMP `when_all` Range Design
 
 **Date:** 2026-08-24
-**Status:** Implemented; local validation passed
+**Status:** Implemented and merged via PR #6
 **Base:** `main` at `724050c`
 **Branch:** `feature/when-all-range`
 

@@ -3,7 +3,7 @@
 **Date:** 2026-08-24
 **Design:** `docs/superpowers/specs/2026-08-24-cmp-when-all-range-design.md`
 **Branch:** `feature/when-all-range`
-**Status:** Implemented; local validation passed
+**Status:** Complete; merged via PR #6
 
 ## 1. Add failing public-contract tests
 
@@ -31,8 +31,10 @@
 
 ## 4. Verify and deliver
 
-**Local verification complete; PR delivery pending.** Dev and Release strict cache-off builds and
-53/53 tests pass. The Release `when_all` suite also passes 50/50 repeated runs.
+**Complete.** Dev and Release strict cache-off builds and 53/53 tests pass. The Release `when_all`
+suite also passes 50/50 repeated runs, and both cross-thread joins pass 5,000 repeated runs after
+fixing the test awaiter's publication race. PR #6 passed Linux, macOS, and Windows CI and was
+squash-merged as `5c202c8`.
 
 - Run strict cache-off Dev and Release builds and all tests.
 - Repeat the focused Release suite and self-review allocation, lifetime, and memory-order edges.

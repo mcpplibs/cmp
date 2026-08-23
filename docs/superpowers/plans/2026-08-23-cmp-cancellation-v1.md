@@ -86,7 +86,8 @@ before merge.
 - The complete Release RunLoop suite passed 10 additional consecutive runs.
 - The standalone example exited with status 0 and printed `Coroutine result: 42` followed by
   `Coroutine cancelled` from coroutine bodies.
-- Cross-platform CI remains pending until a later user-authorized push.
+- Manual Linux x86_64, macOS arm64, and Windows x86_64 workflows all passed for implementation
+  commit `3a997ab`, including the build, 38 tests, and standalone example.
 
 ## Completion Gate
 

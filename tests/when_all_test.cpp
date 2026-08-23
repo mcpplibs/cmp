@@ -96,7 +96,9 @@ public:
     }
 
     void await_suspend(std::coroutine_handle<> continuation) const {
-        *worker_ = std::jthread { [continuation] {
+        // 启动线程前复制成员，恢复后当前 awaiter 可能立即销毁。
+        auto* const worker = worker_;
+        *worker = std::jthread { [continuation] {
             continuation.resume();
         } };
     }

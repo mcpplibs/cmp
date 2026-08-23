@@ -17,7 +17,8 @@ LLVM 22.1.8，测试依赖为 `compat.gtest` 1.15.2。实现位于 `src/`，契�
 
 当前分支为 `feature/when-all-range`，基于已与远端同步的 `main` 提交 `724050c`。variadic
 `when_all` v1 已通过 PR #5 合并；运行时同类型 Task 集合的
-`when_all(std::vector<Task<T>>)` 已完成实现、本地验证、示例和三语文档，等待提交与 PR 交付。
+`when_all(std::vector<Task<T>>)` 已完成实现、本地验证、示例和三语文档；功能提交已推送并创建
+PR #6，首轮 macOS CI 暴露的测试辅助 awaiter 发布竞态已修复并复验，等待补充提交刷新 CI。
 
 ## 已完成工作
 
@@ -109,6 +110,11 @@ LLVM 22.1.8，测试依赖为 `compat.gtest` 1.15.2。实现位于 `src/`，契�
 - 动态集合独立示例运行通过，依次输出 `Coroutine result: 42`、`Concurrent result: 42` 和
   `Coroutine cancelled`。
 - 本阶段本地验证完成于 2026-08-24 01:27:08 CST；远端三平台 CI 尚待提交与 PR 后验证。
+- PR #6 首轮 macOS 在 vector 跨线程测试中以 exit 139 失败；根因是测试辅助 awaiter 启动
+  新线程后才读取自身 `worker_` 成员，新线程可能先恢复并销毁 awaiter。修复为发布前把指针
+  复制到当前栈；库公开实现未因此改变，三平台复验待新提交触发。
+- 竞态修复后的 Dev/Release 聚焦套件均为 15/15；两个跨线程汇合测试在本机 Release 下额外
+  连续执行 5,000 轮全部通过。
 
 ## 已知问题 / 风险
 
@@ -123,8 +129,8 @@ LLVM 22.1.8，测试依赖为 `compat.gtest` 1.15.2。实现位于 `src/`，契�
 
 ## 剩余工作
 
-1. 完成最终差异检查并以简短中文提交信息提交、推送功能分支。
-2. 创建 PR，等待 Linux、macOS、Windows 三平台检查全部通过后 squash 合并。
+1. 提交测试 awaiter 竞态修复并推送到现有 PR #6。
+2. 等待 Linux、macOS、Windows 三平台检查全部通过后 squash 合并。
 3. 快进同步本地 `main`，更新合并状态并验证 `main` CI。
 
 ## 推荐下一步

@@ -7,7 +7,8 @@
 CMP is a C++23 module project with a small coroutine execution core. The root module exports a
 lazy, single-consumer `mcpplibs::cmp::Task<T>`, `RunLoop`, and its copyable `Scheduler` handle.
 `RunLoop::run()` is the public root execution boundary, while `Scheduler::schedule()` explicitly
-returns a suspended coroutine to that loop.
+returns a suspended coroutine to that loop. `schedule_after()` and `schedule_at()` add relative
+and absolute `steady_clock` deadlines without a timer thread.
 
 The repository contains:
 
@@ -73,8 +74,8 @@ targets. CMP does not track an `mcpp.lock` file; it is excluded by `.gitignore`.
 `.xlings.json` pins the mcpp version used by the project. `mcpp build` builds the inferred library
 target. `mcpp test` discovers both test files and links a gtest entry point for each. The tests
 verify Task ownership and symmetric transfer together with root execution, scheduling, exception
-propagation, cross-thread wake-up, invalid scheduler use, loop reuse, and stack-safe repeated
-scheduling.
+propagation, timed and cross-thread wake-up, invalid scheduler use, loop reuse, and stack-safe
+repeated scheduling.
 
 Each CI workflow installs the project tools, builds the library, runs the test suite, and runs
 `examples/basic`. The workflows are separate because tool installation and runner details differ
@@ -111,12 +112,14 @@ import mcpplibs.cmp;
 using mcpplibs::cmp::Task;
 using mcpplibs::cmp::RunLoop;
 
+using namespace std::chrono_literals;
+
 Task<int> answer() {
     co_return 42;
 }
 
 Task<void> print_answer(RunLoop::Scheduler scheduler) {
-    co_await scheduler.schedule();
+    co_await scheduler.schedule_after(10ms);
     auto value = co_await answer();
     std::println("Coroutine result: {}", value);
     co_return;
@@ -130,8 +133,8 @@ int main() {
 
 This example checks path dependency resolution, module consumption, external coroutine
 compilation, and the public root runner independently of the root test targets. The RunLoop drives
-`print_answer()` on the main thread; the explicit scheduling point is reached before the coroutine
-prints `Coroutine result: 42`.
+`print_answer()` on the main thread; a short monotonic timer expires before the coroutine prints
+`Coroutine result: 42`.
 
 Any translation unit that defines a coroutine imports `std` itself so `std::coroutine_traits` and
 the standard coroutine protocol types participate in compilation. The CMP module imports `std`
@@ -160,11 +163,15 @@ contract violation.
 - a RunLoop can be reused sequentially, but nested and concurrent `run()` calls throw
   `std::logic_error`;
 - `schedule()` always suspends and appends its continuation to a thread-safe FIFO ready queue;
+- `schedule_after()` measures a native `steady_clock` duration at suspension, while
+  `schedule_at()` accepts an absolute steady-clock time point;
+- elapsed deadlines remain asynchronous; future deadlines use a minimum timer heap, and expiry
+  only makes the continuation eligible for FIFO dispatch;
 - producers may enqueue from other threads, but only the thread inside `run()` consumes the queue;
 - using a Scheduler after its RunLoop is destroyed, or while its own RunLoop is not active, throws
   `std::logic_error` from the await expression;
-- root completion with separately queued work is rejected because detached ownership is not part
-  of this phase.
+- root completion with separately queued work or a pending timer is rejected because detached
+  ownership is not part of this phase.
 
 RunLoop does not own a worker thread and supplies no automatic thread affinity. An external
 awaiter may resume a Task on another thread; awaiting the original Scheduler explicitly returns
@@ -172,7 +179,7 @@ the continuation to its RunLoop. A Task that suspends without arranging another 
 source to resume it can leave `run()` blocked indefinitely. Blocking functions still block the
 thread on which the coroutine currently executes.
 
-There is no public free-standing `sync_wait`, detached execution, timer, cancellation mechanism,
+There is no public free-standing `sync_wait`, detached execution, timer cancellation mechanism,
 asynchronous I/O backend, custom frame allocator, or blocking-work pool. The module also provides
 no compatibility alias for the old scaffold module.
 
@@ -190,7 +197,7 @@ The following areas may be considered in separate designs. They are not part of 
 package contract:
 
 1. structured task scopes and concurrent joins;
-2. timers, wake-up paths, and cancellation;
+2. cancellation and structured wake-up paths;
 3. multi-worker scheduling and work stealing;
 4. asynchronous I/O integrations;
 5. a dedicated pool for unavoidable blocking work;
@@ -211,10 +218,10 @@ cd examples/basic
 mcpp run
 ```
 
-The expected result is a successful library build, 22 passing tests across two binaries, and an
-example that prints `Coroutine result: 42` and exits with status 0. One test performs one million
-immediate Task completions; another performs 100,000 explicit scheduling operations. These check
-that neither symmetric transfer nor queued scheduling grows the native call stack. The current
+The expected result is a successful library build, 29 passing tests across two binaries, and an
+example that prints `Coroutine result: 42` and exits with status 0. Tests perform one million
+immediate Task completions, 100,000 explicit schedules, and 100,000 immediate timers. These check
+that symmetric transfer and both queued paths do not grow the native call stack. The current
 Windows LLVM toolchain does not emit GNU depfiles. If a file
 included by a module interface changes, an incremental build can reuse an older BMI or object;
 `--cache=off` is used for a full local verification.

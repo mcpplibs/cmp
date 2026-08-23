@@ -17,10 +17,11 @@
 
 > [!IMPORTANT]
 > CMP 已提供延遲啟動、單一消費者的 `Task<T>` / `Task<void>`，以及在呼叫執行緒運行、
-> 支援明確排程的 `RunLoop`。取消、計時器、非同步 I/O 和 detached 執行尚未實作。
+> 支援明確排程和單調時鐘定時排程的 `RunLoop`。取消、非同步 I/O 和 detached 執行尚未實作。
 
-CMP 計畫以標準無堆疊 C++ 協程建構現代協程執行期與函式庫。專案將以明確的 `co_await`
-為主線，透過經過驗證的小步驟逐步探索排程、計時器、非同步 I/O、取消，以及阻塞工作的安全隔離。
+CMP 計畫以標準無堆疊 C++ 協程建構現代協程執行期與函式庫。明確的 `co_await` 模型現已
+涵蓋排程和單調時鐘計時器，並將透過經過驗證的小步驟繼續探索非同步 I/O、取消，以及阻塞
+工作的安全隔離。
 
 ## 為什麼叫 CMP？
 
@@ -43,7 +44,7 @@ C++ 標準協程是語言機制，不是完整執行期。因此 CMP 不會宣�
 - task 自動等同於 Go goroutine；
 - 任意阻塞呼叫會自動成為非阻塞呼叫；
 - 可以直接在訊號處理器中安全切換協程；
-- M:N 排程、work stealing、計時器、取消或非同步 I/O 已經實作。
+- M:N 排程、work stealing、取消或非同步 I/O 已經實作。
 
 這些能力必須分別設計和驗證。預期方向是明確的非同步 I/O awaiter、專用 blocking pool
 以及協作式安全點。
@@ -67,9 +68,9 @@ cd examples/basic
 mcpp run
 ```
 
-範例會從經過排程的 `Task<void>` 協程內部印出 `Coroutine result: 42`，然後以成功狀態結束。
-它負責證明獨立 mcpp 套件能夠解析路徑相依、匯入 `mcpplibs.cmp`、組合 Task 並透過公開
-RunLoop 驅動任務。
+範例會先等待一個短 RunLoop 計時器，再從 `Task<void>` 協程內部印出
+`Coroutine result: 42`，然後以成功狀態結束。它負責證明獨立 mcpp 套件能夠解析路徑相依、
+匯入 `mcpplibs.cmp`、組合 Task 並透過公開 RunLoop 使用定時排程。
 
 ## 目前 API
 
@@ -80,12 +81,14 @@ import mcpplibs.cmp;
 using mcpplibs::cmp::Task;
 using mcpplibs::cmp::RunLoop;
 
+using namespace std::chrono_literals;
+
 Task<int> answer() {
     co_return 42;
 }
 
 Task<void> print_answer(RunLoop::Scheduler scheduler) {
-    co_await scheduler.schedule();
+    co_await scheduler.schedule_after(10ms);
     auto value = co_await answer();
     std::println("Coroutine result: {}", value);
     co_return;
@@ -106,9 +109,10 @@ continuation 之間直接轉移，並透過 RAII 銷毀未消費的協程框架�
 `std`，不會向使用端重新匯出整個標準函式庫。
 
 `RunLoop::run()` 消費一個根 Task，在呼叫執行緒執行就緒協程，回傳結果並重新拋出例外。
-`Scheduler::schedule()` 始終暫停目前協程並把 continuation 放入佇列。Scheduler 可以複製，
-但始終屬於建立它的 RunLoop。支援依序多次呼叫 `run()`，巢狀或並行呼叫會被拒絕。已經被
-移動的 Task 不得再次等待。
+`Scheduler::schedule()` 始終暫停目前協程並把 continuation 放入佇列；`schedule_after()`
+等待相對的 `steady_clock` 時長，`schedule_at()` 等待絕對的單調時鐘時間點。期限到達只讓
+任務具備執行資格，不會 inline 恢復。Scheduler 可以複製，但始終屬於建立它的 RunLoop。
+支援依序多次呼叫 `run()`，巢狀或並行呼叫會被拒絕。已經被移動的 Task 不得再次等待。
 
 RunLoop 不是背景執行緒，也不會把阻塞程式碼自動變成非同步程式碼。如果 Task 暫停後沒有
 安排未來的恢復動作，`run()` 可能一直等待。CMP 不提供隱式執行緒親和：外部 awaiter 在其他
@@ -155,7 +159,7 @@ CMP 目前不追蹤 `mcpp.lock`，`.gitignore` 明確執行這項儲存庫約定
 1. 套件識別與可匯入模組 bootstrap——已完成；
 2. 協程 task 與生命週期語意——已實作初始 `Task`；
 3. 根任務驅動器和最小單執行緒排程器——已完成初始實作；
-4. 計時器、取消和結構化喚醒路徑；
+4. 單調時鐘 Timer v1——已實作；取消和結構化喚醒路徑仍待開發；
 5. 多 worker 排程與 work stealing；
 6. 非同步 I/O 整合和 blocking pool。
 

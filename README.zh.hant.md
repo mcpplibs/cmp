@@ -17,13 +17,13 @@
 
 > [!IMPORTANT]
 > CMP 已提供延遲啟動、單一消費者的 `Task<T>` / `Task<void>`、支援變參和 vector 的結構化
-> `when_all()`、eager 結構化 `TaskGroup`，以及在呼叫執行緒運行、支援明確排程和單調時鐘
-> 定時排程的 `RunLoop`。定時等待和 TaskGroup 子任務可明確使用基於 `std::stop_token` 的
-> 協作式取消；非同步 I/O 和 detached 執行尚未實作。
+> `when_all()`、eager 結構化 `TaskGroup`、單向 `OneShotEvent`，以及在呼叫執行緒運行、支援
+> 明確排程和單調時鐘定時排程的 `RunLoop`。定時等待和 TaskGroup 子任務可明確使用基於
+> `std::stop_token` 的協作式取消；非同步 I/O 和 detached 執行尚未實作。
 
 CMP 計畫以標準無堆疊 C++ 協程建構現代協程執行期與函式庫。明確的 `co_await` 模型現已
-涵蓋固定與增量結構化並行、排程、單調時鐘計時器和可取消定時等待，並將透過經過驗證的
-小步驟繼續探索非同步 I/O，以及阻塞工作的安全隔離。
+涵蓋固定與增量結構化並行、一次性事件通知、排程、單調時鐘計時器和可取消定時等待，並將
+透過經過驗證的小步驟繼續探索非同步 I/O，以及阻塞工作的安全隔離。
 
 ## 為什麼叫 CMP？
 
@@ -71,9 +71,9 @@ mcpp run
 ```
 
 範例會印出 `Coroutine result: 42`，匯合兩個定時 Task 後印出 `Concurrent result: 42`，
-eager 啟動兩個作用域 Task 後印出 `Task group result: 42`，再從預先取消的定時等待印出
-`Coroutine cancelled`；所有輸出都在 `Task<void>` 協程內部。它負責證明獨立 mcpp 套件能夠
-匯入 `mcpplibs.cmp`、組合、啟動並匯合 Task，以及透過公開 RunLoop 使用定時排程和取消。
+eager 啟動兩個作用域 Task 後印出 `Task group result: 42`，等待一次性通知後印出
+`Event signalled`，最後從預先取消的定時等待印出 `Coroutine cancelled`；所有輸出都在
+`Task<void>` 協程內部。
 
 ## 目前 API
 
@@ -84,6 +84,7 @@ import mcpplibs.cmp;
 using mcpplibs::cmp::Task;
 using mcpplibs::cmp::RunLoop;
 using mcpplibs::cmp::OperationCancelled;
+using mcpplibs::cmp::OneShotEvent;
 using mcpplibs::cmp::TaskGroup;
 using mcpplibs::cmp::when_all;
 
@@ -137,6 +138,22 @@ Task<void> print_task_group(RunLoop::Scheduler scheduler) {
     co_return;
 }
 
+Task<void> set_event(RunLoop::Scheduler scheduler, OneShotEvent& event) {
+    co_await scheduler.schedule();
+    event.set();
+    co_return;
+}
+
+Task<void> print_event(RunLoop::Scheduler scheduler) {
+    OneShotEvent event {};
+    TaskGroup group {};
+    group.spawn(set_event(scheduler, event));
+    co_await event;
+    co_await group.join();
+    std::println("Event signalled");
+    co_return;
+}
+
 Task<void> print_cancellation(RunLoop::Scheduler scheduler, std::stop_token token) {
     try {
         co_await scheduler.schedule_after(1s, token);
@@ -151,6 +168,7 @@ int main() {
     loop.run(print_answer(loop.get_scheduler()));
     loop.run(print_concurrent_results(loop.get_scheduler()));
     loop.run(print_task_group(loop.get_scheduler()));
+    loop.run(print_event(loop.get_scheduler()));
 
     std::stop_source source {};
     source.request_stop();
@@ -174,6 +192,10 @@ continuation 之間直接轉移，並透過 RAII 銷毀未消費的協程框架�
 接納，等待所有已接納子任務，再依接納順序重新拋出第一個例外。TaskGroup 必須在解構前完成
 join。`get_stop_token()` 和 `request_stop()` 提供一個明確的標準取消通道；token 不會自動
 注入，開發者需要將它傳給支援取消的子任務。需要傳回子任務結果時應使用 `when_all()`。
+
+在未 set 的 `OneShotEvent` 上執行 `co_await event` 會無分配地暫停。第一次執行緒安全的 `set()`
+會永久設定事件，並在 setter 執行緒恰好恢復每個已註冊等待者一次；後續等待 inline 繼續，後續
+set 不做任何事。事件不可移動且必須比等待者活得更久；v1 不提供 reset 或隱式 Scheduler 轉移。
 
 定義協程的轉譯單元必須匯入 `std`，使編譯器能夠看到標準協程協定型別。CMP 私下匯入
 `std`，不會向使用端重新匯出整個標準函式庫。
@@ -203,10 +225,12 @@ RunLoop 不是背景執行緒，也不會把阻塞程式碼自動變成非同步
 ├── src/run_loop.cppm              # RunLoop 與 Scheduler 分割區
 ├── src/when_all.cppm              # 結構化並行 Task 匯合
 ├── src/task_group.cppm             # eager 可變結構化 Task 作用域
+├── src/one_shot_event.cppm         # 無分配一次性通知
 ├── tests/cmp_test.cpp             # Task 契約和生命週期測試
 ├── tests/run_loop_test.cpp        # 排程、邊界和執行緒測試
 ├── tests/when_all_test.cpp        # 匯合所有權、結果和競態測試
 ├── tests/task_group_test.cpp       # 可變作用域生命週期和競態測試
+├── tests/one_shot_event_test.cpp   # 事件發布和競態測試
 ├── examples/basic/                # 獨立的路徑相依 consumer
 ├── docs/architecture.zh.hant.md   # 目前結構、邊界與演進方向
 └── .github/workflows/             # Linux、macOS 和 Windows CI
@@ -237,8 +261,8 @@ CMP 目前不追蹤 `mcpp.lock`，`.gitignore` 明確執行這項儲存庫約定
 1. 套件識別與可匯入模組 bootstrap——已完成；
 2. 協程 task 與生命週期語意——已實作初始 `Task`；
 3. 根任務驅動器和最小單執行緒排程器——已完成初始實作；
-4. 單調時鐘 Timer v1、可取消定時等待、變參/vector 匯合和 TaskGroup v1——已實作；遞迴
-   作用域接納、更廣泛的取消傳播和更多喚醒路徑仍待開發；
+4. 單調時鐘 Timer v1、可取消定時等待、變參/vector 匯合、TaskGroup v1 和 OneShotEvent v1
+   ——已實作；遞迴作用域接納、更廣泛的取消傳播和可複用喚醒路徑仍待開發；
 5. 多 worker 排程與 work stealing；
 6. 非同步 I/O 整合和 blocking pool。
 

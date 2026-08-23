@@ -17,13 +17,13 @@
 
 > [!IMPORTANT]
 > CMP provides a lazy, single-consumer `Task<T>` / `Task<void>` and a caller-thread `RunLoop`
-> with explicit scheduling. Cancellation, timers, asynchronous I/O, and detached execution are
-> not implemented.
+> with explicit and monotonic timed scheduling. Cancellation, asynchronous I/O, and detached
+> execution are not implemented.
 
 CMP is being built as a modern coroutine runtime and library on standard stackless C++
-coroutines. The intended direction is an explicit `co_await` model that can grow, in small
-verified steps, toward scheduling, timers, asynchronous I/O, cancellation, and safe handling of
-blocking work.
+coroutines. Its explicit `co_await` model now covers scheduling and monotonic timers and can grow,
+in small verified steps, toward asynchronous I/O, cancellation, and safe handling of blocking
+work.
 
 ## Why CMP?
 
@@ -48,7 +48,7 @@ promise that:
 - a task is automatically equivalent to a Go goroutine;
 - an arbitrary blocking call becomes non-blocking;
 - coroutine switching is safe directly inside a signal handler;
-- M:N scheduling, work stealing, timers, cancellation, or async I/O already exist.
+- M:N scheduling, work stealing, cancellation, or async I/O already exist.
 
 Those capabilities must be designed and verified individually. The expected direction is
 explicit async I/O awaiters, a dedicated blocking pool, and cooperative safe points.
@@ -72,9 +72,10 @@ cd examples/basic
 mcpp run
 ```
 
-The example prints `Coroutine result: 42` from inside a scheduled `Task<void>` coroutine and exits
-successfully. It proves that an independent mcpp package can resolve the path dependency, import
-`mcpplibs.cmp`, compose Tasks, and drive them through the public RunLoop.
+The example waits for a short RunLoop timer, prints `Coroutine result: 42` from inside a
+`Task<void>` coroutine, and exits successfully. It proves that an independent mcpp package can
+resolve the path dependency, import `mcpplibs.cmp`, compose Tasks, and use timed scheduling through
+the public RunLoop.
 
 ## Current API
 
@@ -85,12 +86,14 @@ import mcpplibs.cmp;
 using mcpplibs::cmp::Task;
 using mcpplibs::cmp::RunLoop;
 
+using namespace std::chrono_literals;
+
 Task<int> answer() {
     co_return 42;
 }
 
 Task<void> print_answer(RunLoop::Scheduler scheduler) {
-    co_await scheduler.schedule();
+    co_await scheduler.schedule_after(10ms);
     auto value = co_await answer();
     std::println("Coroutine result: {}", value);
     co_return;
@@ -114,9 +117,11 @@ library.
 
 `RunLoop::run()` consumes one root Task, executes ready coroutines on the calling thread, returns
 its value, and rethrows its exception. `Scheduler::schedule()` always suspends and queues the
-continuation. Scheduler handles are copyable, but remain tied to their originating RunLoop.
-Sequential `run()` calls are supported; nested or concurrent calls are rejected. A moved-from Task
-must not be awaited.
+continuation. `schedule_after()` waits for a relative `steady_clock` duration, while
+`schedule_at()` waits for an absolute steady-clock time point; expiry makes work eligible and
+never resumes it inline. Scheduler handles are copyable, but remain tied to their originating
+RunLoop. Sequential `run()` calls are supported; nested or concurrent calls are rejected. A
+moved-from Task must not be awaited.
 
 RunLoop is not a background thread and does not make blocking code asynchronous. A Task that
 suspends without arranging a future resume can leave `run()` waiting indefinitely. CMP does not
@@ -166,7 +171,7 @@ Runtime work is split into independently reviewable phases:
 1. package identity and importable-module bootstrap — implemented;
 2. coroutine task and lifetime semantics — initial `Task` implemented;
 3. a root runner and minimal single-thread scheduler — initially implemented;
-4. timers, cancellation, and structured wake-up paths;
+4. monotonic Timer v1 — implemented; cancellation and structured wake-up paths remain;
 5. multi-worker scheduling and work stealing;
 6. asynchronous I/O integration and a blocking pool.
 

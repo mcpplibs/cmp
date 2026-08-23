@@ -5,6 +5,21 @@ import :task;
 
 namespace mcpplibs::cmp::detail {
 
+using RunLoopClock = std::chrono::steady_clock;
+
+struct TimerEntry final {
+    RunLoopClock::time_point deadline_ {};
+    std::coroutine_handle<> continuation_ {};
+};
+
+struct TimerEntryLater final {
+    [[nodiscard]] bool operator()(
+        const TimerEntry& left,
+        const TimerEntry& right) const noexcept {
+        return left.deadline_ > right.deadline_;
+    }
+};
+
 struct RootCompletionBase {
     bool completed_ { false };
     std::exception_ptr exception_ {};
@@ -23,6 +38,11 @@ private:
     std::mutex mutex_ {};
     std::condition_variable condition_ {};
     std::deque<std::coroutine_handle<>> ready_ {};
+    // ponytail: v1 堆不支持任意删除；加入取消时改为惰性失效或可删除结构。
+    std::priority_queue<
+        TimerEntry,
+        std::vector<TimerEntry>,
+        TimerEntryLater> timers_ {};
     bool running_ { false };
 
 public:
@@ -33,7 +53,7 @@ public:
             throw std::logic_error { "run loop is already running" };
         }
 
-        if (!ready_.empty()) {
+        if (!ready_.empty() || !timers_.empty()) {
             throw std::logic_error { "run loop contains abandoned work" };
         }
 
@@ -58,6 +78,53 @@ public:
         condition_.notify_one();
     }
 
+    void enqueue_after(
+        RunLoopClock::duration delay,
+        std::coroutine_handle<> coroutine) {
+        const auto now = RunLoopClock::now();
+
+        if (delay <= RunLoopClock::duration::zero()) {
+            enqueue_at(now, coroutine);
+            return;
+        }
+
+        const auto deadline = now > RunLoopClock::time_point::max() - delay
+            ? RunLoopClock::time_point::max()
+            : now + delay;
+        enqueue_at(deadline, coroutine);
+    }
+
+    void enqueue_at(
+        RunLoopClock::time_point deadline,
+        std::coroutine_handle<> coroutine) {
+        if (!coroutine) {
+            throw std::invalid_argument { "cannot schedule an empty coroutine" };
+        }
+
+        bool shouldNotify { false };
+
+        {
+            const std::lock_guard lock { mutex_ };
+
+            if (!running_) {
+                throw std::logic_error { "scheduler has no active run" };
+            }
+
+            if (deadline <= RunLoopClock::now()) {
+                ready_.push_back(coroutine);
+                shouldNotify = true;
+            } else {
+                shouldNotify = timers_.empty() ||
+                    deadline < timers_.top().deadline_;
+                timers_.push(TimerEntry { deadline, coroutine });
+            }
+        }
+
+        if (shouldNotify) {
+            condition_.notify_one();
+        }
+    }
+
     void complete(RootCompletionBase& completion) noexcept {
         // 通过互斥量发布完成状态，以及此前写入的结果或异常
         {
@@ -74,23 +141,40 @@ public:
 
             {
                 std::unique_lock lock { mutex_ };
-                condition_.wait(lock, [&] {
-                    return completion.completed_ || !ready_.empty();
-                });
 
-                if (completion.completed_) {
-                    if (!ready_.empty()) {
-                        throw std::logic_error {
-                            "root task completed with outstanding work"
-                        };
+                while (true) {
+                    if (completion.completed_) {
+                        if (!ready_.empty() || !timers_.empty()) {
+                            throw std::logic_error {
+                                "root task completed with outstanding work"
+                            };
+                        }
+
+                        running_ = false;
+                        return;
                     }
 
-                    running_ = false;
-                    return;
-                }
+                    if (!timers_.empty() &&
+                        timers_.top().deadline_ <= RunLoopClock::now()) {
+                        // 先入 FIFO 再出队，避免 ready 或 Timer 任一侧长期饥饿。
+                        ready_.push_back(timers_.top().continuation_);
+                        timers_.pop();
+                    }
 
-                coroutine = ready_.front();
-                ready_.pop_front();
+                    if (!ready_.empty()) {
+                        coroutine = ready_.front();
+                        ready_.pop_front();
+                        break;
+                    }
+
+                    if (timers_.empty()) {
+                        condition_.wait(lock);
+                    } else {
+                        // 等待会解锁，必须复制期限，不能持有可能因堆重排失效的引用。
+                        const auto deadline = timers_.top().deadline_;
+                        condition_.wait_until(lock, deadline);
+                    }
+                }
             }
 
             if (!coroutine || coroutine.done()) {
@@ -105,6 +189,7 @@ public:
     void abort_run() noexcept {
         const std::lock_guard lock { mutex_ };
         ready_.clear();
+        timers_ = {};
         running_ = false;
     }
 };
@@ -230,7 +315,25 @@ export namespace mcpplibs::cmp {
 class RunLoop final {
 public:
     class Scheduler final {
+    public:
+        using Clock = std::chrono::steady_clock;
+        using Duration = Clock::duration;
+        using TimePoint = Clock::time_point;
+
     private:
+        [[nodiscard]] static std::shared_ptr<detail::RunLoopState> lock_state_(
+            const std::weak_ptr<detail::RunLoopState>& state) {
+            const auto lockedState = state.lock();
+
+            if (!lockedState) {
+                throw std::logic_error {
+                    "scheduler's run loop no longer exists"
+                };
+            }
+
+            return lockedState;
+        }
+
         class ScheduleAwaiter final {
         private:
             std::weak_ptr<detail::RunLoopState> state_ {};
@@ -246,13 +349,57 @@ public:
 
             void await_suspend(std::coroutine_handle<> continuation) {
                 // 入队后协程可能立即恢复，因此先把状态保存到当前线程的栈上。
-                const auto state = state_.lock();
-
-                if (!state) {
-                    throw std::logic_error { "scheduler's run loop no longer exists" };
-                }
-
+                const auto state = Scheduler::lock_state_(state_);
                 state->enqueue(continuation);
+            }
+
+            constexpr void await_resume() const noexcept {}
+        };
+
+        class ScheduleAfterAwaiter final {
+        private:
+            std::weak_ptr<detail::RunLoopState> state_ {};
+            Duration delay_ {};
+
+        public:
+            ScheduleAfterAwaiter(
+                std::weak_ptr<detail::RunLoopState> state,
+                Duration delay) noexcept
+                : state_ { std::move(state) }, delay_ { delay } {}
+
+            [[nodiscard]] constexpr bool await_ready() const noexcept {
+                return false;
+            }
+
+            void await_suspend(std::coroutine_handle<> continuation) {
+                // 入队后 awaiter 可能被销毁，先复制所有仍需使用的状态。
+                const auto state = Scheduler::lock_state_(state_);
+                const auto delay = delay_;
+                state->enqueue_after(delay, continuation);
+            }
+
+            constexpr void await_resume() const noexcept {}
+        };
+
+        class ScheduleAtAwaiter final {
+        private:
+            std::weak_ptr<detail::RunLoopState> state_ {};
+            TimePoint deadline_ {};
+
+        public:
+            ScheduleAtAwaiter(
+                std::weak_ptr<detail::RunLoopState> state,
+                TimePoint deadline) noexcept
+                : state_ { std::move(state) }, deadline_ { deadline } {}
+
+            [[nodiscard]] constexpr bool await_ready() const noexcept {
+                return false;
+            }
+
+            void await_suspend(std::coroutine_handle<> continuation) {
+                const auto state = Scheduler::lock_state_(state_);
+                const auto deadline = deadline_;
+                state->enqueue_at(deadline, continuation);
             }
 
             constexpr void await_resume() const noexcept {}
@@ -276,6 +423,14 @@ public:
 
         [[nodiscard]] auto schedule() const noexcept {
             return ScheduleAwaiter { state_ };
+        }
+
+        [[nodiscard]] auto schedule_after(Duration delay) const noexcept {
+            return ScheduleAfterAwaiter { state_, delay };
+        }
+
+        [[nodiscard]] auto schedule_at(TimePoint deadline) const noexcept {
+            return ScheduleAtAwaiter { state_, deadline };
         }
 
         friend bool operator==(

@@ -14,9 +14,10 @@ LLVM 22.1.8，测试依赖为 `compat.gtest` 1.15.2。实现位于 `src/`，契�
 
 ## 当前目标与状态
 
-当前分支为 `main`，已包含 PR #4 的 squash 合并提交 `ad80fb0`。Cancellation v1 已完成实现、
-本地 Dev/Release 验证、重复竞态验证、独立示例和三语文档同步；PR 最终 head 和合并后的
-`main` 均通过 Linux、macOS、Windows CI。本地与远端 `main` 已同步，远端功能分支仍保留。
+当前分支为 `feature/when-all-v1`，基于已与远端同步的 `main` 提交 `f3d199c`。下一模块确定为
+结构化并发汇合 `when_all` v1；设计、实现、契约测试、独立示例和三语公开文档已完成，完整
+Dev/Release 验证和自审通过，提交、推送、PR、CI 与合并尚待完成。此前 Cancellation v1 已
+通过 PR #4 合并，并通过本地与 Linux、macOS、Windows CI 验证。
 
 ## 已完成工作
 
@@ -30,8 +31,14 @@ LLVM 22.1.8，测试依赖为 `compat.gtest` 1.15.2。实现位于 `src/`，契�
 - deadline 和取消只有一个终态；已经进入 ready 队列的 deadline 完成不会被较晚停止请求替换。
 - 增加预取消、跨线程、RunLoop 线程、非最早 Timer、晚取消、竞态恰好一次、无效 Scheduler、
   无 stop-state token、清理复用和十万次预取消栈安全等测试。
-- 独立示例现在从协程内依次打印正常定时结果和取消结果。
+- 独立示例现在从协程内依次打印正常定时、并发汇合和取消结果。
 - 已同步 README、架构说明、设计文档和实施计划的英文、简体中文、繁体中文事实。
+- 已完成 `when_all` v1 设计：输入 Task 由汇合 awaiter 结构化持有，全部结束后按参数顺序
+  返回结果或抛出第一个异常；`void` 映射为 `std::monostate`。
+- 已导出 variadic `when_all(Task<Results>...)`；支持零输入、异构与 move-only 结果、void
+  占位、同步完成和跨线程完成。
+- 新增 8 项汇合契约测试、10 万次同步汇合栈安全压力，以及独立 consumer 的并发结果打印。
+- README 与架构说明的英文、简体中文、繁体中文事实已同步到 `when_all` v1。
 
 ## 重要决策
 
@@ -42,27 +49,35 @@ LLVM 22.1.8，测试依赖为 `compat.gtest` 1.15.2。实现位于 `src/`，契�
 - Timer entry 只增加一个非 owning 取消状态指针；外部销毁已发布协程帧仍属于无效使用。
 - 取消当前用 O(n) 扫描并重建堆；只有实测为瓶颈后才引入可删除或带索引的堆。
 - 不增加后台线程、依赖、公开 Timer 句柄、TaskGroup、detached 或测试专用公共接口。
+- `when_all` v1 使用“子任务数 + 1”原子计数哨兵，覆盖同步完成和跨线程完成竞态。
+- `when_all` 等待全部子任务收尾后再传播异常，不允许因 fail-fast 提前销毁仍在运行的帧。
+- 当前阶段只实现固定参数包汇合；动态 TaskGroup、spawn 和隐式取消传播继续独立设计。
 
 ## 修改 / 重要文件
 
 - `src/run_loop.cppm`：公开异常、token 重载、取消状态、回调和显式 Timer 堆。
+- `src/when_all.cppm`：join coroutine、原子计数哨兵和 variadic 公开 API。
+- `src/cmp.cppm`：导出 `:when_all` 分区。
 - `tests/run_loop_test.cpp`：Cancellation v1 契约、边界、竞态和栈安全测试。
+- `tests/when_all_test.cpp`：结构化所有权、结果、异常、线程和栈安全测试。
 - `examples/basic/src/main.cpp`：协程内正常输出和预取消输出示例。
 - `README.md`、`README.zh.md`、`README.zh.hant.md`：当前 API、示例和路线图。
 - `docs/architecture.md`、`docs/architecture.zh.md`、`docs/architecture.zh.hant.md`：实现契约、
   边界与验证基线。
 - `docs/superpowers/specs/2026-08-23-cmp-cancellation-v1-design.md`：已实现设计。
 - `docs/superpowers/plans/2026-08-23-cmp-cancellation-v1.md`：已完成实施清单和本地结果。
+- `docs/superpowers/specs/2026-08-24-cmp-when-all-v1-design.md`：当前汇合 API 设计。
+- `docs/superpowers/plans/2026-08-24-cmp-when-all-v1.md`：当前实施与交付清单。
 - `.agent/HANDOFF.md`：本文件。
 
 ## 验证情况
 
 - 新测试先因缺少 `OperationCancelled` 和 token 重载按预期编译失败，完成实现后转绿。
 - Dev 严格无缓存构建通过，完整测试 38/38（8 个 Task、30 个 RunLoop）。
-- Release 严格无缓存构建通过，完整测试 38/38。
+- Cancellation v1 合并前的 Release 严格无缓存构建通过，完整测试 38/38。
 - Release 的完整 RunLoop 30 项套件额外连续执行 10 次，全部通过；未见双恢复、死锁或丢唤醒。
 - `examples/basic` 的 `mcpp run` 状态为 0，依次输出 `Coroutine result: 42` 和
-  `Coroutine cancelled`。
+  `Concurrent result: 42`、`Coroutine cancelled`。
 - 功能提交 `3a997ab` 的 Linux x86_64、macOS arm64、Windows x86_64 手动 CI 均通过构建、
   38 项测试和独立示例。
 - PR #4 最终 head `67d0efc` 的三平台检查全部通过；合并提交 `ad80fb0` 触发的 `main` 三平台
@@ -70,6 +85,11 @@ LLVM 22.1.8，测试依赖为 `compat.gtest` 1.15.2。实现位于 `src/`，契�
 - mcpp 仍提示本机 SubOS 缺少 `subos_info`，但工具链解析为 LLVM 22.1.8，未影响构建或运行。
 - 已按用户授权提交、推送、创建 PR #4 并 squash 合并；未删除远端功能分支或修改其他远端
   资源。
+- 新测试先因缺少 `when_all` 导出按预期编译失败；实现后聚焦测试 8/8 通过。
+- Dev 与 Release 严格无缓存构建通过；两个 profile 的完整测试均为 46/46（8 个 Task、
+  30 个 RunLoop、8 个 when_all）。
+- Release 的完整 `when_all` 8 项套件额外连续执行 50 次，全部通过。
+- 更新后的独立示例构建运行通过并输出三行预期结果。
 
 ## 已知问题 / 风险
 
@@ -79,13 +99,15 @@ LLVM 22.1.8，测试依赖为 `compat.gtest` 1.15.2。实现位于 `src/`，契�
 - 外部销毁已经发布到 RunLoop 的协程帧仍不受支持；Cancellation v1 不提供 detached 安全。
 - 取消只覆盖 Scheduler 定时等待，不会中断阻塞调用，也不会自动传播到任意子 Task 或外部
   awaiter。
+- pending `when_all` 仍遵循现有 Task 边界：子任务发布 continuation 后，外部提前销毁聚合
+  帧属于无效使用。
+- `when_all` v1 尚未完成 Linux、macOS、Windows 三平台 CI 验证。
 
 ## 剩余工作
 
-1. Cancellation v1 阶段没有剩余实现工作。
-2. 下一阶段从最新 `main` 创建新分支，再独立设计结构化任务作用域与取消传播。
+1. 审查待提交文件和暂存 diff，创建中文本地提交并推送功能分支。
+2. 创建 PR、等待三平台 CI，通过后 squash 合并并同步本地 `main`。
 
 ## 推荐下一步
 
-下一步是从最新 `main` 创建新分支，设计结构化任务作用域与取消传播；不要继续在已经合并的
-Cancellation v1 分支上开发。
+下一步审查完整待提交 diff 后提交并推送，再创建 PR；只有三平台检查全部通过才合并。

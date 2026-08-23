@@ -16,13 +16,13 @@
 [![ci-windows](https://github.com/mcpplibs/cmp/actions/workflows/ci-windows.yml/badge.svg?branch=main)](https://github.com/mcpplibs/cmp/actions/workflows/ci-windows.yml)
 
 > [!IMPORTANT]
-> CMP 已提供懒启动、单消费者的 `Task<T>` / `Task<void>`，以及在调用线程运行、支持显式
-> 调度和单调时钟定时调度的 `RunLoop`。定时等待已支持基于 `std::stop_token` 的协作式取消；
-> 异步 I/O 和 detached 执行尚未实现。
+> CMP 已提供懒启动、单消费者的 `Task<T>` / `Task<void>`、结构化变参汇合 `when_all()`，
+> 以及在调用线程运行、支持显式调度和单调时钟定时调度的 `RunLoop`。定时等待已支持基于
+> `std::stop_token` 的协作式取消；异步 I/O 和 detached 执行尚未实现。
 
-CMP 计划基于标准无栈 C++ 协程构建现代协程运行时和库。显式 `co_await` 模型现已覆盖调度、
-单调时钟定时器和可取消定时等待，并将通过经过验证的小步骤继续探索异步 I/O 以及阻塞工作的
-安全隔离。
+CMP 计划基于标准无栈 C++ 协程构建现代协程运行时和库。显式 `co_await` 模型现已覆盖结构化
+并发汇合、调度、单调时钟定时器和可取消定时等待，并将通过经过验证的小步骤继续探索异步
+I/O 以及阻塞工作的安全隔离。
 
 ## 为什么叫 CMP？
 
@@ -69,9 +69,10 @@ cd examples/basic
 mcpp run
 ```
 
-示例会在一个短 RunLoop 定时器后打印 `Coroutine result: 42`，再从预先取消的定时等待打印
-`Coroutine cancelled`；两行都在 `Task<void>` 协程内部输出。它负责证明独立 mcpp 包能够
-导入 `mcpplibs.cmp`、组合 Task，并通过公共 RunLoop 使用定时调度和取消。
+示例会打印 `Coroutine result: 42`，汇合两个定时 Task 后打印 `Concurrent result: 42`，
+再从预先取消的定时等待打印 `Coroutine cancelled`；所有输出都在 `Task<void>` 协程内部。
+它负责证明独立 mcpp 包能够导入 `mcpplibs.cmp`、组合并汇合 Task，以及通过公共 RunLoop
+使用定时调度和取消。
 
 ## 当前 API
 
@@ -82,6 +83,7 @@ import mcpplibs.cmp;
 using mcpplibs::cmp::Task;
 using mcpplibs::cmp::RunLoop;
 using mcpplibs::cmp::OperationCancelled;
+using mcpplibs::cmp::when_all;
 
 using namespace std::chrono_literals;
 
@@ -93,6 +95,22 @@ Task<void> print_answer(RunLoop::Scheduler scheduler) {
     co_await scheduler.schedule_after(10ms);
     auto value = co_await answer();
     std::println("Coroutine result: {}", value);
+    co_return;
+}
+
+Task<int> delayed_value(
+    RunLoop::Scheduler scheduler,
+    std::chrono::milliseconds delay,
+    int value) {
+    co_await scheduler.schedule_after(delay);
+    co_return value;
+}
+
+Task<void> print_concurrent_results(RunLoop::Scheduler scheduler) {
+    auto [first, second] = co_await when_all(
+        delayed_value(scheduler, 10ms, 20),
+        delayed_value(scheduler, 1ms, 22));
+    std::println("Concurrent result: {}", first + second);
     co_return;
 }
 
@@ -108,6 +126,7 @@ Task<void> print_cancellation(RunLoop::Scheduler scheduler, std::stop_token toke
 int main() {
     RunLoop loop {};
     loop.run(print_answer(loop.get_scheduler()));
+    loop.run(print_concurrent_results(loop.get_scheduler()));
 
     std::stop_source source {};
     source.request_stop();
@@ -119,6 +138,11 @@ int main() {
 开始执行。Task 只能移动、只有一个消费者且只能作为右值等待；它保存值或异常，在子协程与
 continuation 之间直接转移，并通过 RAII 销毁未消费的协程帧。当前刻意不支持 `Task<T&>`、
 复制、移动赋值和 detached 执行。
+
+`when_all()` 同样采用懒启动。等待它时会从左到右启动全部输入 Task，不会等待较早挂起的输入
+完成，并持续持有所有子协程帧，直到全部输入结束。结果按参数顺序组成 `std::tuple`；
+`Task<void>` 对应 `std::monostate`。如果子任务失败，仍会先等待全部子任务收尾，再按参数
+顺序重新抛出第一个异常。命名 Task 必须移动到 `when_all()` 中。
 
 定义协程的翻译单元必须导入 `std`，使编译器能够看到标准协程协议类型。CMP 私有导入
 `std`，不会向使用方重新导出整个标准库。
@@ -146,8 +170,10 @@ RunLoop 不是后台线程，也不会把阻塞代码自动变成异步代码。
 ├── src/cmp.cppm              # 根模块接口
 ├── src/task.cppm             # Task 模块分区
 ├── src/run_loop.cppm         # RunLoop 与 Scheduler 分区
+├── src/when_all.cppm         # 结构化并发 Task 汇合
 ├── tests/cmp_test.cpp        # Task 契约和生命周期测试
 ├── tests/run_loop_test.cpp   # 调度、边界和线程测试
+├── tests/when_all_test.cpp   # 汇合所有权、结果和竞态测试
 ├── examples/basic/           # 独立的路径依赖 consumer
 ├── docs/architecture.zh.md   # 当前结构、边界和演进方向
 └── .github/workflows/        # Linux、macOS 和 Windows CI
@@ -178,7 +204,8 @@ CMP 当前不跟踪 `mcpp.lock`，`.gitignore` 明确执行这一仓库约定。
 1. 包身份和可导入模块 bootstrap——已完成；
 2. 协程 task 与生命周期语义——已实现初始 `Task`；
 3. 根任务驱动器和最小单线程调度器——已完成初始实现；
-4. 单调时钟 Timer v1 和可取消定时等待——已实现；结构化任务所有权和唤醒路径仍待开发；
+4. 单调时钟 Timer v1、可取消定时等待和变参结构化汇合——已实现；动态任务作用域、取消传播
+   和更多唤醒路径仍待开发；
 5. 多 worker 调度与 work stealing；
 6. 异步 I/O 集成和 blocking pool。
 

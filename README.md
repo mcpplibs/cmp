@@ -16,14 +16,15 @@
 [![ci-windows](https://github.com/mcpplibs/cmp/actions/workflows/ci-windows.yml/badge.svg?branch=main)](https://github.com/mcpplibs/cmp/actions/workflows/ci-windows.yml)
 
 > [!IMPORTANT]
-> CMP provides a lazy, single-consumer `Task<T>` / `Task<void>` and a caller-thread `RunLoop`
-> with explicit and monotonic timed scheduling. Timed waits support cooperative cancellation with
-> `std::stop_token`; asynchronous I/O and detached execution are not implemented.
+> CMP provides a lazy, single-consumer `Task<T>` / `Task<void>`, structured variadic `when_all()`,
+> and a caller-thread `RunLoop` with explicit and monotonic timed scheduling. Timed waits support
+> cooperative cancellation with `std::stop_token`; asynchronous I/O and detached execution are
+> not implemented.
 
 CMP is being built as a modern coroutine runtime and library on standard stackless C++
-coroutines. Its explicit `co_await` model now covers scheduling, monotonic timers, and cancellable
-timed waits and can grow, in small verified steps, toward asynchronous I/O and safe handling of
-blocking work.
+coroutines. Its explicit `co_await` model now covers structured concurrent joins, scheduling,
+monotonic timers, and cancellable timed waits and can grow, in small verified steps, toward
+asynchronous I/O and safe handling of blocking work.
 
 ## Why CMP?
 
@@ -72,10 +73,11 @@ cd examples/basic
 mcpp run
 ```
 
-The example prints `Coroutine result: 42` after a short RunLoop timer, then prints
-`Coroutine cancelled` from a pre-cancelled timed wait. Both messages come from `Task<void>`
-coroutines. It proves that an independent mcpp package can import `mcpplibs.cmp`, compose Tasks,
-and use timed scheduling and cancellation through the public RunLoop.
+The example prints `Coroutine result: 42`, joins two timed Tasks and prints
+`Concurrent result: 42`, then prints `Coroutine cancelled` from a pre-cancelled timed wait. All
+messages come from `Task<void>` coroutines. It proves that an independent mcpp package can import
+`mcpplibs.cmp`, compose and join Tasks, and use timed scheduling and cancellation through the
+public RunLoop.
 
 ## Current API
 
@@ -86,6 +88,7 @@ import mcpplibs.cmp;
 using mcpplibs::cmp::Task;
 using mcpplibs::cmp::RunLoop;
 using mcpplibs::cmp::OperationCancelled;
+using mcpplibs::cmp::when_all;
 
 using namespace std::chrono_literals;
 
@@ -97,6 +100,22 @@ Task<void> print_answer(RunLoop::Scheduler scheduler) {
     co_await scheduler.schedule_after(10ms);
     auto value = co_await answer();
     std::println("Coroutine result: {}", value);
+    co_return;
+}
+
+Task<int> delayed_value(
+    RunLoop::Scheduler scheduler,
+    std::chrono::milliseconds delay,
+    int value) {
+    co_await scheduler.schedule_after(delay);
+    co_return value;
+}
+
+Task<void> print_concurrent_results(RunLoop::Scheduler scheduler) {
+    auto [first, second] = co_await when_all(
+        delayed_value(scheduler, 10ms, 20),
+        delayed_value(scheduler, 1ms, 22));
+    std::println("Concurrent result: {}", first + second);
     co_return;
 }
 
@@ -112,6 +131,7 @@ Task<void> print_cancellation(RunLoop::Scheduler scheduler, std::stop_token toke
 int main() {
     RunLoop loop {};
     loop.run(print_answer(loop.get_scheduler()));
+    loop.run(print_concurrent_results(loop.get_scheduler()));
 
     std::stop_source source {};
     source.request_stop();
@@ -124,6 +144,12 @@ int main() {
 either a value or an exception, transfers directly between child and continuation, and destroys
 an unconsumed frame through RAII. `Task<T&>`, copying, move assignment, and detached execution are
 deliberately unsupported.
+
+`when_all()` is also lazy. Awaiting it starts every input Task from left to right without waiting
+for earlier suspended inputs, then keeps all child frames alive until every input completes.
+Results are returned in parameter order as a `std::tuple`; `Task<void>` contributes
+`std::monostate`. If children fail, all children still finish before the first exception in
+parameter order is rethrown. Named Tasks must be moved into `when_all()`.
 
 A translation unit that defines a coroutine must import `std` so the compiler can see the standard
 coroutine protocol types. CMP imports `std` privately and does not re-export the whole standard
@@ -156,8 +182,10 @@ await the desired Scheduler to return to its RunLoop.
 ├── src/cmp.cppm              # root module interface
 ├── src/task.cppm             # Task module partition
 ├── src/run_loop.cppm         # RunLoop and Scheduler partition
+├── src/when_all.cppm         # structured concurrent Task join
 ├── tests/cmp_test.cpp        # Task contract and lifetime tests
 ├── tests/run_loop_test.cpp   # scheduler, boundary, and threading tests
+├── tests/when_all_test.cpp   # join ownership, result, and race tests
 ├── examples/basic/           # standalone path-dependency consumer
 ├── docs/architecture.md      # current structure, boundaries, and evolution
 └── .github/workflows/        # Linux, macOS, and Windows CI
@@ -190,8 +218,8 @@ Runtime work is split into independently reviewable phases:
 1. package identity and importable-module bootstrap — implemented;
 2. coroutine task and lifetime semantics — initial `Task` implemented;
 3. a root runner and minimal single-thread scheduler — initially implemented;
-4. monotonic Timer v1 and cancellable timed waits — implemented; structured task ownership and
-   wake-up paths remain;
+4. monotonic Timer v1, cancellable timed waits, and variadic structured joins — implemented;
+   dynamic task scopes, cancellation propagation, and more wake-up paths remain;
 5. multi-worker scheduling and work stealing;
 6. asynchronous I/O integration and a blocking pool.
 

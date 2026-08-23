@@ -7,9 +7,43 @@ namespace mcpplibs::cmp::detail {
 
 using RunLoopClock = std::chrono::steady_clock;
 
+[[nodiscard]] RunLoopClock::time_point deadline_after(
+    RunLoopClock::duration delay) noexcept {
+    const auto now = RunLoopClock::now();
+
+    if (delay <= RunLoopClock::duration::zero()) {
+        return now;
+    }
+
+    return now > RunLoopClock::time_point::max() - delay
+        ? RunLoopClock::time_point::max()
+        : now + delay;
+}
+
+enum class TimedWaitOutcome {
+    pending,
+    deadline,
+    cancelled
+};
+
+struct TimedCancellationState final {
+    std::atomic<bool> stopRequested_ { false };
+    TimedWaitOutcome outcome_ { TimedWaitOutcome::pending };
+};
+
+class RunLoopState;
+
+struct TimedCancelCallback final {
+    std::weak_ptr<RunLoopState> state_ {};
+    TimedCancellationState* cancellation_ {};
+
+    void operator()() const noexcept;
+};
+
 struct TimerEntry final {
     RunLoopClock::time_point deadline_ {};
     std::coroutine_handle<> continuation_ {};
+    TimedCancellationState* cancellation_ {};
 };
 
 struct TimerEntryLater final {
@@ -38,12 +72,19 @@ private:
     std::mutex mutex_ {};
     std::condition_variable condition_ {};
     std::deque<std::coroutine_handle<>> ready_ {};
-    // ponytail: v1 堆不支持任意删除；加入取消时改为惰性失效或可删除结构。
-    std::priority_queue<
-        TimerEntry,
-        std::vector<TimerEntry>,
-        TimerEntryLater> timers_ {};
+    // ponytail: v1 取消为 O(n) 重排；测得瓶颈后再换可删除堆。
+    std::vector<TimerEntry> timers_ {};
     bool running_ { false };
+
+    void push_timer_(TimerEntry timer) {
+        timers_.push_back(std::move(timer));
+        std::ranges::push_heap(timers_, TimerEntryLater {});
+    }
+
+    void pop_timer_() noexcept {
+        std::ranges::pop_heap(timers_, TimerEntryLater {});
+        timers_.pop_back();
+    }
 
 public:
     void begin_run() {
@@ -81,22 +122,13 @@ public:
     void enqueue_after(
         RunLoopClock::duration delay,
         std::coroutine_handle<> coroutine) {
-        const auto now = RunLoopClock::now();
-
-        if (delay <= RunLoopClock::duration::zero()) {
-            enqueue_at(now, coroutine);
-            return;
-        }
-
-        const auto deadline = now > RunLoopClock::time_point::max() - delay
-            ? RunLoopClock::time_point::max()
-            : now + delay;
-        enqueue_at(deadline, coroutine);
+        enqueue_at(deadline_after(delay), coroutine);
     }
 
     void enqueue_at(
         RunLoopClock::time_point deadline,
-        std::coroutine_handle<> coroutine) {
+        std::coroutine_handle<> coroutine,
+        TimedCancellationState* cancellation = nullptr) {
         if (!coroutine) {
             throw std::invalid_argument { "cannot schedule an empty coroutine" };
         }
@@ -110,14 +142,55 @@ public:
                 throw std::logic_error { "scheduler has no active run" };
             }
 
-            if (deadline <= RunLoopClock::now()) {
+            if (cancellation && cancellation->stopRequested_.load()) {
                 ready_.push_back(coroutine);
+                cancellation->outcome_ = TimedWaitOutcome::cancelled;
+                shouldNotify = true;
+            } else if (deadline <= RunLoopClock::now()) {
+                ready_.push_back(coroutine);
+
+                if (cancellation) {
+                    cancellation->outcome_ = TimedWaitOutcome::deadline;
+                }
+
                 shouldNotify = true;
             } else {
                 shouldNotify = timers_.empty() ||
-                    deadline < timers_.top().deadline_;
-                timers_.push(TimerEntry { deadline, coroutine });
+                    deadline < timers_.front().deadline_;
+                push_timer_(TimerEntry {
+                    deadline,
+                    coroutine,
+                    cancellation
+                });
             }
+        }
+
+        if (shouldNotify) {
+            condition_.notify_one();
+        }
+    }
+
+    void request_timer_cancellation(
+        TimedCancellationState& cancellation) noexcept {
+        bool shouldNotify { false };
+
+        {
+            const std::lock_guard lock { mutex_ };
+            const auto timer = std::ranges::find_if(
+                timers_,
+                [&](const TimerEntry& entry) {
+                    return entry.cancellation_ == &cancellation;
+                });
+
+            if (timer == timers_.end() ||
+                cancellation.outcome_ != TimedWaitOutcome::pending) {
+                return;
+            }
+
+            cancellation.outcome_ = TimedWaitOutcome::cancelled;
+            timer->deadline_ = RunLoopClock::time_point::min();
+            std::ranges::make_heap(timers_, TimerEntryLater {});
+            shouldNotify = true;
         }
 
         if (shouldNotify) {
@@ -155,10 +228,19 @@ public:
                     }
 
                     if (!timers_.empty() &&
-                        timers_.top().deadline_ <= RunLoopClock::now()) {
+                        timers_.front().deadline_ <= RunLoopClock::now()) {
                         // 先入 FIFO 再出队，避免 ready 或 Timer 任一侧长期饥饿。
-                        ready_.push_back(timers_.top().continuation_);
-                        timers_.pop();
+                        auto& timer = timers_.front();
+                        ready_.push_back(timer.continuation_);
+
+                        if (timer.cancellation_ &&
+                            timer.cancellation_->outcome_ ==
+                                TimedWaitOutcome::pending) {
+                            timer.cancellation_->outcome_ =
+                                TimedWaitOutcome::deadline;
+                        }
+
+                        pop_timer_();
                     }
 
                     if (!ready_.empty()) {
@@ -171,7 +253,7 @@ public:
                         condition_.wait(lock);
                     } else {
                         // 等待会解锁，必须复制期限，不能持有可能因堆重排失效的引用。
-                        const auto deadline = timers_.top().deadline_;
+                        const auto deadline = timers_.front().deadline_;
                         condition_.wait_until(lock, deadline);
                     }
                 }
@@ -189,10 +271,18 @@ public:
     void abort_run() noexcept {
         const std::lock_guard lock { mutex_ };
         ready_.clear();
-        timers_ = {};
+        timers_.clear();
         running_ = false;
     }
 };
+
+inline void TimedCancelCallback::operator()() const noexcept {
+    cancellation_->stopRequested_.store(true);
+
+    if (const auto state = state_.lock()) {
+        state->request_timer_cancellation(*cancellation_);
+    }
+}
 
 class RunGuard final {
 private:
@@ -312,6 +402,13 @@ RootOperation make_root_operation(Task<T> task, RootCompletion<T>& completion) {
 
 export namespace mcpplibs::cmp {
 
+class OperationCancelled final : public std::exception {
+public:
+    [[nodiscard]] const char* what() const noexcept override {
+        return "operation cancelled";
+    }
+};
+
 class RunLoop final {
 public:
     class Scheduler final {
@@ -405,6 +502,110 @@ public:
             constexpr void await_resume() const noexcept {}
         };
 
+        class CancellableScheduleAfterAwaiter final {
+        private:
+            using StopCallback = std::stop_callback<detail::TimedCancelCallback>;
+
+            std::weak_ptr<detail::RunLoopState> state_ {};
+            Duration delay_ {};
+            std::stop_token stopToken_ {};
+            detail::TimedCancellationState cancellation_ {};
+            // 必须最先析构，阻止回调继续访问 awaiter 内状态。
+            std::optional<StopCallback> stopCallback_ {};
+
+        public:
+            CancellableScheduleAfterAwaiter(
+                std::weak_ptr<detail::RunLoopState> state,
+                Duration delay,
+                std::stop_token stopToken) noexcept
+                : state_ { std::move(state) },
+                  delay_ { delay },
+                  stopToken_ { std::move(stopToken) } {}
+
+            [[nodiscard]] constexpr bool await_ready() const noexcept {
+                return false;
+            }
+
+            void await_suspend(std::coroutine_handle<> continuation) {
+                const auto state = Scheduler::lock_state_(state_);
+                const auto deadline = detail::deadline_after(delay_);
+
+                stopCallback_.emplace(
+                    stopToken_,
+                    detail::TimedCancelCallback {
+                        state,
+                        &cancellation_
+                    });
+
+                // 发布后 awaiter 可能立即销毁，此后不得再读取成员。
+                state->enqueue_at(
+                    deadline,
+                    continuation,
+                    &cancellation_);
+            }
+
+            void await_resume() {
+                stopCallback_.reset();
+
+                if (cancellation_.outcome_ ==
+                    detail::TimedWaitOutcome::cancelled) {
+                    throw OperationCancelled {};
+                }
+            }
+        };
+
+        class CancellableScheduleAtAwaiter final {
+        private:
+            using StopCallback = std::stop_callback<detail::TimedCancelCallback>;
+
+            std::weak_ptr<detail::RunLoopState> state_ {};
+            TimePoint deadline_ {};
+            std::stop_token stopToken_ {};
+            detail::TimedCancellationState cancellation_ {};
+            // 必须最先析构，阻止回调继续访问 awaiter 内状态。
+            std::optional<StopCallback> stopCallback_ {};
+
+        public:
+            CancellableScheduleAtAwaiter(
+                std::weak_ptr<detail::RunLoopState> state,
+                TimePoint deadline,
+                std::stop_token stopToken) noexcept
+                : state_ { std::move(state) },
+                  deadline_ { deadline },
+                  stopToken_ { std::move(stopToken) } {}
+
+            [[nodiscard]] constexpr bool await_ready() const noexcept {
+                return false;
+            }
+
+            void await_suspend(std::coroutine_handle<> continuation) {
+                const auto state = Scheduler::lock_state_(state_);
+                const auto deadline = deadline_;
+
+                stopCallback_.emplace(
+                    stopToken_,
+                    detail::TimedCancelCallback {
+                        state,
+                        &cancellation_
+                    });
+
+                // 发布后 awaiter 可能立即销毁，此后不得再读取成员。
+                state->enqueue_at(
+                    deadline,
+                    continuation,
+                    &cancellation_);
+            }
+
+            void await_resume() {
+                stopCallback_.reset();
+
+                if (cancellation_.outcome_ ==
+                    detail::TimedWaitOutcome::cancelled) {
+                    throw OperationCancelled {};
+                }
+            }
+        };
+
         std::weak_ptr<detail::RunLoopState> state_ {};
 
         explicit Scheduler(
@@ -429,8 +630,28 @@ public:
             return ScheduleAfterAwaiter { state_, delay };
         }
 
+        [[nodiscard]] auto schedule_after(
+            Duration delay,
+            std::stop_token stopToken) const noexcept {
+            return CancellableScheduleAfterAwaiter {
+                state_,
+                delay,
+                std::move(stopToken)
+            };
+        }
+
         [[nodiscard]] auto schedule_at(TimePoint deadline) const noexcept {
             return ScheduleAtAwaiter { state_, deadline };
+        }
+
+        [[nodiscard]] auto schedule_at(
+            TimePoint deadline,
+            std::stop_token stopToken) const noexcept {
+            return CancellableScheduleAtAwaiter {
+                state_,
+                deadline,
+                std::move(stopToken)
+            };
         }
 
         friend bool operator==(

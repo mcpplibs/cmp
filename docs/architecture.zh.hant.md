@@ -8,7 +8,7 @@ CMP 是一個具備小型協程執行核心的 C++23 模組專案。根模組匯
 `mcpplibs::cmp::Task<T>`、`RunLoop` 及其可複製的 `Scheduler` 控制代碼。`RunLoop::run()`
 是公開根任務執行邊界，`Scheduler::schedule()` 用於明確地把暫停協程送回對應執行迴圈。
 `schedule_after()` 和 `schedule_at()` 在沒有計時執行緒的情況下提供相對和絕對的
-`steady_clock` 期限。
+`steady_clock` 期限；接受 `std::stop_token` 的多載使這些等待可以協作式取消。
 
 儲存庫現有內容包括：
 
@@ -72,7 +72,7 @@ mcpp 套件由 `mcpplibs` 和 `cmp` 共同識別。使用端在 `[dependencies.m
 `.xlings.json` 固定專案使用的 mcpp 版本。`mcpp build` 建置自動推斷的函式庫目標。
 `mcpp test` 會找到兩個測試檔案，並為每個檔案連結 gtest 進入點。測試同時驗證 Task 所有權
 和對稱轉移，以及根任務執行、普通與定時排程、例外傳播、跨執行緒期限喚醒、無效
-Scheduler、RunLoop 重複使用和不會增長呼叫堆疊的重複排程。
+Scheduler、取消競態、RunLoop 重複使用和不會增長呼叫堆疊的重複排程。
 
 三套 CI 工作流程都會安裝專案工具、建置函式庫、執行測試並執行 `examples/basic`。不同
 作業系統的工具安裝和執行環境不同，因此分別保留工作流程檔案。
@@ -106,6 +106,7 @@ import mcpplibs.cmp;
 
 using mcpplibs::cmp::Task;
 using mcpplibs::cmp::RunLoop;
+using mcpplibs::cmp::OperationCancelled;
 
 using namespace std::chrono_literals;
 
@@ -120,15 +121,29 @@ Task<void> print_answer(RunLoop::Scheduler scheduler) {
     co_return;
 }
 
+Task<void> print_cancellation(RunLoop::Scheduler scheduler, std::stop_token token) {
+    try {
+        co_await scheduler.schedule_after(1s, token);
+    } catch (const OperationCancelled&) {
+        std::println("Coroutine cancelled");
+    }
+    co_return;
+}
+
 int main() {
     RunLoop loop {};
     loop.run(print_answer(loop.get_scheduler()));
+
+    std::stop_source source {};
+    source.request_stop();
+    loop.run(print_cancellation(loop.get_scheduler(), source.get_token()));
 }
 ```
 
 這個範例在根測試目標之外，單獨檢查路徑相依解析、模組使用、外部協程編譯和公開根任務
 驅動器。RunLoop 在主執行緒驅動 `print_answer()`；短單調時鐘計時器到期後，協程輸出
-`Coroutine result: 42`。
+`Coroutine result: 42`。第二個協程隨後從預先取消的定時等待捕捉 `OperationCancelled`，並
+輸出 `Coroutine cancelled`。
 
 任何定義協程的轉譯單元都要自行匯入 `std`，使 `std::coroutine_traits` 和標準協程協定型別
 參與編譯。CMP 模組私下匯入 `std`，而不是向使用端重新匯出整個標準函式庫。
@@ -156,8 +171,12 @@ int main() {
 - `schedule()` 始終暫停，並把 continuation 追加到執行緒安全的 FIFO 就緒佇列；
 - `schedule_after()` 在暫停時測量原生 `steady_clock` 時長，`schedule_at()` 接受絕對的
   單調時鐘時間點；
+- 接受 token 的定時多載始終暫停；取消獲勝時拋出 `OperationCancelled`，較晚的停止要求
+  不能取代已經進入就緒佇列的期限完成；
 - 已到期的期限仍非同步排隊；未來期限進入最小 Timer 堆，到期只讓 continuation 具備進入
   FIFO 排程的資格；
+- 停止回呼只改變計時器狀態並喚醒 RunLoop，不會 inline 恢復使用者協程；目前取消透過 O(n)
+  掃描定位對應計時器；
 - 其他執行緒可以入列，但只有正在執行 `run()` 的執行緒會消費佇列；
 - RunLoop 銷毀後繼續使用其 Scheduler，或在其所屬 RunLoop 未運行時使用 Scheduler，皆會
   從 await 運算式拋出 `std::logic_error`；
@@ -169,8 +188,9 @@ Task；明確等待原 Scheduler 才會把 continuation 送回對應 RunLoop。�
 安排其他執行緒或事件來源恢復它，`run()` 可能無限等待。阻塞函式仍會阻塞協程目前所在的
 執行緒。
 
-目前沒有公開自由函式 `sync_wait`、detached 執行、Timer 取消機制、非同步 I/O 後端、自訂
-協程框架 allocator 或阻塞工作執行緒池，也沒有保留舊骨架模組的相容別名。
+目前沒有公開自由函式 `sync_wait`、detached 執行、獨立 Timer 控制代碼、非同步 I/O 後端、
+自訂協程框架 allocator 或阻塞工作執行緒池。取消只明確用於定時等待；模組既不提供隱式取消
+傳播，也沒有普通 `schedule()` 的 token 多載，並且沒有保留舊骨架模組的相容別名。
 
 捕捉變數的協程 lambda 需要特別小心：立即呼叫一個暫時的捕捉 lambda，可能使延遲協程參考
 已經銷毀的閉包。CMP 尚未提供延長該閉包生命週期的輔助函式。
@@ -183,8 +203,8 @@ CMP 名稱中的 `C` 與 Go 執行期中的 `G` 相呼應，但這只說明命�
 
 以下方向可以分別設計和審查，目前都不是套件的既有約定：
 
-1. 結構化任務作用域和並行匯合；
-2. 取消和結構化喚醒路徑；
+1. 結構化任務作用域、並行匯合和取消傳播；
+2. 更多結構化喚醒路徑；
 3. 多工作執行緒排程和工作竊取；
 4. 非同步 I/O 整合；
 5. 處理無法避免之阻塞工作的專用執行緒池；
@@ -204,8 +224,9 @@ cd examples/basic
 mcpp run
 ```
 
-預期結果是函式庫建置成功、兩個二進位檔中的 29 項測試全部通過，而且範例輸出
-`Coroutine result: 42` 後以狀態 0 結束。測試分別執行一百萬次立即完成的 Task、十萬次明確
-排程和十萬次立即 Timer，用於檢查對稱轉移和兩種佇列路徑都不會增長原生呼叫堆疊。目前
-Windows LLVM 工具鏈不會產生 GNU depfile；如果模組介面包含的檔案發生變更，增量建置可能
-沿用舊的 BMI 或目的檔。完整複驗時使用 `--cache=off`。
+預期結果是函式庫建置成功、兩個二進位檔中的 38 項測試全部通過，而且範例依序輸出
+`Coroutine result: 42` 和 `Coroutine cancelled` 後以狀態 0 結束。測試分別執行一百萬次
+立即完成的 Task、十萬次明確排程、十萬次立即 Timer 和十萬次預先取消的定時等待，用於檢查
+對稱轉移和所有佇列路徑都不會增長原生呼叫堆疊。目前 Windows LLVM 工具鏈不會產生 GNU
+depfile；如果模組介面包含的檔案發生變更，增量建置可能沿用舊的 BMI 或目的檔。完整複驗時
+使用 `--cache=off`。

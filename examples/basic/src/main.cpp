@@ -4,6 +4,7 @@ import mcpplibs.cmp;
 using mcpplibs::cmp::Task;
 using mcpplibs::cmp::RunLoop;
 using mcpplibs::cmp::OperationCancelled;
+using mcpplibs::cmp::TaskGroup;
 using mcpplibs::cmp::when_all;
 
 using namespace std::chrono_literals;
@@ -36,6 +37,26 @@ Task<void> print_concurrent_results(RunLoop::Scheduler scheduler) {
     co_return;
 }
 
+Task<void> add_delayed(
+    RunLoop::Scheduler scheduler,
+    std::chrono::milliseconds delay,
+    int value,
+    int& total) {
+    co_await scheduler.schedule_after(delay);
+    total += value;
+    co_return;
+}
+
+Task<void> print_task_group(RunLoop::Scheduler scheduler) {
+    int total { 0 };
+    TaskGroup group {};
+    group.spawn(add_delayed(scheduler, 10ms, 20, total));
+    group.spawn(add_delayed(scheduler, 1ms, 22, total));
+    co_await group.join();
+    std::println("Task group result: {}", total);
+    co_return;
+}
+
 Task<void> print_cancellation(RunLoop::Scheduler scheduler, std::stop_token token) {
     try {
         co_await scheduler.schedule_after(1s, token);
@@ -49,6 +70,7 @@ int main() {
     RunLoop loop {};
     loop.run(print_answer(loop.get_scheduler()));
     loop.run(print_concurrent_results(loop.get_scheduler()));
+    loop.run(print_task_group(loop.get_scheduler()));
 
     std::stop_source source {};
     source.request_stop();

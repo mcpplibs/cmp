@@ -3,8 +3,8 @@
 ## 项目概览
 
 CMP 是使用 mcpp 构建的 C++23 Modules 协程运行时库。当前公开核心包括惰性、唯一所有权的
-`Task<T>`，支持变参与同类型动态集合的结构化 `when_all()`，单消费者 `RunLoop`，以及可复制
-的 `RunLoop::Scheduler`。Scheduler 支持普通
+`Task<T>`，支持变参与同类型动态集合的结构化 `when_all()`，eager 可变结构化 `TaskGroup`，
+单消费者 `RunLoop`，以及可复制的 `RunLoop::Scheduler`。Scheduler 支持普通
 `schedule()`、相对期限 `schedule_after()` 和绝对期限 `schedule_at()`；定时等待可显式接收
 `std::stop_token`，取消获胜时抛出 `OperationCancelled`。由 Scheduler 入队的 continuation
 均由调用 `RunLoop::run()` 的线程恢复。
@@ -15,10 +15,9 @@ LLVM 22.1.8，测试依赖为 `compat.gtest` 1.15.2。实现位于 `src/`，契�
 
 ## 当前目标与状态
 
-当前分支为 `main`，已与远端同步到 PR #6 的 squash 合并提交 `5c202c8`。variadic
-`when_all` v1 已通过 PR #5 合并；运行时同类型 Task 集合的
-`when_all(std::vector<Task<T>>)` 已完成实现、验证、示例、三语文档和三平台交付。下一阶段尚未
-创建分支，准备独立设计可变结构化任务作用域。
+当前分支为 `feature/task-group-v1`，基于已与远端同步的 `main` 提交 `4467ab0`。variadic 与
+vector `when_all` 均已合并；最小可变结构化任务作用域 `TaskGroup` 已完成实现、公开契约测试、
+独立示例、三语文档和本地严格验证，尚未提交或推送。
 
 ## 已完成工作
 
@@ -47,6 +46,15 @@ LLVM 22.1.8，测试依赖为 `compat.gtest` 1.15.2。实现位于 `src/`，契�
 - 新增 7 项动态集合契约测试和 5 万次立即汇合栈安全压力；独立示例改为在协程内构造并汇合
   `std::vector<Task<int>>`。
 - README、架构说明、设计文档和实施计划已同步动态集合 API 与 53 项测试基线。
+- 已导出不可移动的 `TaskGroup`；`spawn(Task<void>)` 接管并 eager 启动子任务，单次 `join()`
+  关闭接纳、等待全部终态，再按接纳顺序传播第一个异常。
+- TaskGroup 使用一个 mutex 保护状态、计数、wrapper 存储和 join continuation；最后一个子任务
+  在锁外通过对称转移恢复 join，不引入后台线程或 detached 生命周期。
+- TaskGroup 直接复用 `std::stop_source` / `std::stop_token` 提供显式共享取消通道，不自动向
+  Task 注入 token。
+- 新增 9 项 TaskGroup 契约测试，覆盖 eager/lazy 边界、并发接纳、join 后关闭、异常顺序、
+  取消、跨线程发布和 5 万次即时完成栈安全。
+- 独立示例和英文、简体中文、繁体中文 README / 架构文档已同步 TaskGroup v1。
 
 ## 重要决策
 
@@ -56,20 +64,27 @@ LLVM 22.1.8，测试依赖为 `compat.gtest` 1.15.2。实现位于 `src/`，契�
 - 取消通过现有 Task 异常路径传播；调用方可以在协程内捕获 `OperationCancelled`。
 - Timer entry 只增加一个非 owning 取消状态指针；外部销毁已发布协程帧仍属于无效使用。
 - 取消当前用 O(n) 扫描并重建堆；只有实测为瓶颈后才引入可删除或带索引的堆。
-- 不增加后台线程、依赖、公开 Timer 句柄、TaskGroup、detached 或测试专用公共接口。
+- 不增加后台线程、依赖、公开 Timer 句柄、detached 或测试专用公共接口。
 - `when_all` v1 使用“子任务数 + 1”原子计数哨兵，覆盖同步完成和跨线程完成竞态。
 - `when_all` 等待全部子任务收尾后再传播异常，不允许因 fail-fast 提前销毁仍在运行的帧。
-- `when_all` v1 先实现固定参数包汇合；动态 TaskGroup、spawn 和隐式取消传播继续独立设计。
+- `when_all` 负责一次性结果汇合；TaskGroup v1 只接纳 `Task<void>`，需要结果时继续使用
+  `when_all()` 或由调用方持有至 join 结束的状态。
 - 范围阶段只接受标准 `std::vector<Task<T>>`，不为尚无需求的任意 range 增加模板层。
+- TaskGroup 的 join 仅能使用一次；join 开始后不允许继续或递归接纳，未 join 的 open/joining
+  group 在析构时终止进程，避免销毁仍被发布的子协程帧。
+- TaskGroup 取消保持显式：`request_stop()` 不会自动取消不接收 token 的子任务，也不提供
+  `cancel_and_join()`、结果 future、scheduler 选择或 completed-wrapper 回收。
 
 ## 修改 / 重要文件
 
 - `src/run_loop.cppm`：公开异常、token 重载、取消状态、回调和显式 Timer 堆。
 - `src/when_all.cppm`：join coroutine、原子计数哨兵和 variadic/vector 公开 API。
-- `src/cmp.cppm`：导出 `:when_all` 分区。
+- `src/task_group.cppm`：eager void 子任务作用域、单次 join、显式 stop 通道和生命周期状态机。
+- `src/cmp.cppm`：导出 `:when_all` 与 `:task_group` 分区。
 - `tests/run_loop_test.cpp`：Cancellation v1 契约、边界、竞态和栈安全测试。
 - `tests/when_all_test.cpp`：变参/vector 的结构化所有权、结果、异常、线程和栈安全测试。
-- `examples/basic/src/main.cpp`：协程内正常输出和预取消输出示例。
+- `tests/task_group_test.cpp`：TaskGroup 接纳、join、异常、取消、线程和栈安全测试。
+- `examples/basic/src/main.cpp`：协程内正常、并发、TaskGroup 和预取消输出示例。
 - `README.md`、`README.zh.md`、`README.zh.hant.md`：当前 API、示例和路线图。
 - `docs/architecture.md`、`docs/architecture.zh.md`、`docs/architecture.zh.hant.md`：实现契约、
   边界与验证基线。
@@ -79,6 +94,8 @@ LLVM 22.1.8，测试依赖为 `compat.gtest` 1.15.2。实现位于 `src/`，契�
 - `docs/superpowers/plans/2026-08-24-cmp-when-all-v1.md`：当前实施与交付清单。
 - `docs/superpowers/specs/2026-08-24-cmp-when-all-range-design.md`：当前动态集合设计。
 - `docs/superpowers/plans/2026-08-24-cmp-when-all-range.md`：当前动态集合实施清单。
+- `docs/superpowers/specs/2026-08-24-cmp-task-group-v1-design.md`：当前 TaskGroup v1 设计。
+- `docs/superpowers/plans/2026-08-24-cmp-task-group-v1.md`：当前 TaskGroup v1 实施清单。
 - `.agent/HANDOFF.md`：本文件。
 
 ## 验证情况
@@ -117,7 +134,16 @@ LLVM 22.1.8，测试依赖为 `compat.gtest` 1.15.2。实现位于 `src/`，契�
   连续执行 5,000 轮全部通过。
 - PR #6 最终 head `ee378aa` 的 Linux x86_64、macOS arm64、Windows x86_64 CI 均通过构建、
   53 项测试和独立示例；已 squash 合并为 `5c202c8`，功能分支保留。
-- 本地 `main` 已快进同步到 `5c202c8`；合并后的交接状态提交和最终 `main` CI 尚待完成。
+- 本地与远端 `main` 已同步到交接提交 `4467ab0`；该提交的 Linux、macOS、Windows 最终 CI
+  均成功。
+- TaskGroup 新测试先因缺少公开类型按预期编译失败；实现后聚焦 Dev 测试 9/9 通过。
+- TaskGroup 阶段 Dev/Release 严格无缓存构建通过；两个 profile 的完整测试均为 62/62（8 个
+  Task、30 个 RunLoop、15 个 when_all、9 个 TaskGroup）。
+- Release 的完整 TaskGroup 套件额外连续执行 50 轮，跨线程完成测试 5,000 轮、并发接纳测试
+  1,000 轮，全部通过。
+- 更新后的独立示例运行成功，依次输出 `Coroutine result: 42`、`Concurrent result: 42`、
+  `Task group result: 42` 和 `Coroutine cancelled`。
+- TaskGroup v1 本地实现与验证阶段完成于 2026-08-24 02:14:36 CST；尚未提交或触发远端 CI。
 
 ## 已知问题 / 风险
 
@@ -129,13 +155,16 @@ LLVM 22.1.8，测试依赖为 `compat.gtest` 1.15.2。实现位于 `src/`，契�
   awaiter。
 - pending `when_all`（包括 vector 重载）仍遵循现有 Task 边界：子任务发布 continuation 后，外部提前销毁聚合
   帧属于无效使用。
+- TaskGroup 会保留所有 wrapper 帧至析构，空间复杂度为 O(n)；v1 不为尚无实测需求增加完成后
+  回收机制。
+- TaskGroup 遗漏 join 会确定性终止，且取消不会自动注入子任务；这两项均是已记录的公开契约。
 
 ## 剩余工作
 
-1. 提交并推送本次合并状态更新，确认最终 `main` 三平台 CI。
-2. 读取本机时间；未到停止窗口则创建新分支，开始可变结构化任务作用域的独立设计。
+1. 提交并推送 `feature/task-group-v1`，创建 PR，等待 Linux、macOS、Windows CI 全绿后合并。
+2. 同步本地 `main`，更新交接状态并验证最终 main CI。
 
 ## 推荐下一步
 
-下一步先验证合并后的 `main`；随后只设计最小可变结构化任务作用域，明确 admission、等待、
-异常与取消边界，不在设计确认前加入 detached 生命周期。
+下一步提交当前 TaskGroup v1 阶段并完成三平台 PR 交付；不要加入 detached、结果 future 或
+递归 shutdown admission。

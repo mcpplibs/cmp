@@ -6,7 +6,7 @@
 
 CMP 是一个具备小型协程执行核心的 C++23 模块项目。根模块导出懒启动、单消费者的
 `mcpplibs::cmp::Task<T>`、结构化变参/vector `when_all()`、eager `TaskGroup`、`RunLoop` 及其
-可复制的 `Scheduler` 句柄和无分配 `OneShotEvent`。汇合原语会持有每个子任务直到结束，一次性
+可复制的 `Scheduler` 句柄、无分配 `OneShotEvent` 和 RAII `AsyncMutex`。汇合原语会持有每个子任务直到结束，一次性
 事件负责发布一个外部信号。`RunLoop::run()` 是公共根任务
 执行边界，`Scheduler::schedule()` 用于显式地把挂起协程送回对应运行循环。
 `schedule_after()` 和 `schedule_at()` 在没有定时线程的情况下提供相对和绝对的
@@ -15,7 +15,7 @@ CMP 是一个具备小型协程执行核心的 C++23 模块项目。根模块导
 仓库现有内容包括：
 
 - 一份 mcpp 包清单；
-- 根模块 `mcpplibs.cmp` 及 Task、RunLoop、`when_all`、TaskGroup、event 模块分区；
+- 根模块 `mcpplibs.cmp` 及 Task、RunLoop、join、event、mutex 模块分区；
 - 覆盖契约、生命周期、异常、调度和线程行为的 gtest 测试；
 - 一个通过路径依赖使用根包的独立示例；
 - Linux、macOS 和 Windows 三套 CI 工作流。
@@ -65,20 +65,22 @@ mcpp 包由 `mcpplibs` 和 `cmp` 共同标识。使用方在 `[dependencies.mcpp
 │   ├── run_loop.cppm
 │   ├── when_all.cppm
 │   ├── task_group.cppm
-│   └── one_shot_event.cppm
+│   ├── one_shot_event.cppm
+│   └── async_mutex.cppm
 ├── tests/
 │   ├── cmp_test.cpp
 │   ├── run_loop_test.cpp
 │   ├── when_all_test.cpp
 │   ├── task_group_test.cpp
-│   └── one_shot_event_test.cpp
+│   ├── one_shot_event_test.cpp
+│   └── async_mutex_test.cpp
 └── mcpp.toml
 ```
 
 ## 构建与测试
 
 `.xlings.json` 固定项目使用的 mcpp 版本。`mcpp build` 构建自动推断的库目标。
-`mcpp test` 发现五个测试文件，并为每个文件链接 gtest 入口。测试同时验证 Task 所有权和
+`mcpp test` 发现六个测试文件，并为每个文件链接 gtest 入口。测试同时验证 Task 所有权和
 对称转移、结构化汇合，以及根任务执行、普通与定时调度、异常传播、跨线程期限唤醒、无效
 Scheduler、取消竞态、RunLoop 复用和不会增长调用栈的重复完成。
 
@@ -114,6 +116,7 @@ import mcpplibs.cmp;
 
 using mcpplibs::cmp::Task;
 using mcpplibs::cmp::RunLoop;
+using mcpplibs::cmp::AsyncMutex;
 using mcpplibs::cmp::OperationCancelled;
 using mcpplibs::cmp::OneShotEvent;
 using mcpplibs::cmp::TaskGroup;
@@ -185,6 +188,28 @@ Task<void> print_event(RunLoop::Scheduler scheduler) {
     co_return;
 }
 
+Task<void> add_locked(
+    RunLoop::Scheduler scheduler,
+    AsyncMutex& mutex,
+    int value,
+    int& total) {
+    co_await scheduler.schedule();
+    auto guard = co_await mutex.lock_async();
+    total += value;
+    co_return;
+}
+
+Task<void> print_mutex(RunLoop::Scheduler scheduler) {
+    int total { 0 };
+    AsyncMutex mutex {};
+    TaskGroup group {};
+    group.spawn(add_locked(scheduler, mutex, 20, total));
+    group.spawn(add_locked(scheduler, mutex, 22, total));
+    co_await group.join();
+    std::println("Mutex result: {}", total);
+    co_return;
+}
+
 Task<void> print_cancellation(RunLoop::Scheduler scheduler, std::stop_token token) {
     try {
         co_await scheduler.schedule_after(1s, token);
@@ -200,6 +225,7 @@ int main() {
     loop.run(print_concurrent_results(loop.get_scheduler()));
     loop.run(print_task_group(loop.get_scheduler()));
     loop.run(print_event(loop.get_scheduler()));
+    loop.run(print_mutex(loop.get_scheduler()));
 
     std::stop_source source {};
     source.request_stop();
@@ -212,7 +238,7 @@ RunLoop 在主线程驱动 `print_answer()`；短单调时钟定时器到期后�
 `Coroutine result: 42`。下一个根任务并发汇合两个定时结果并输出 `Concurrent result: 42`。
 随后一个协程 eager 启动并汇合两个 void Task，再输出 `Task group result: 42`。最后一个协程
 等待一次性信号并输出 `Event signalled`。最后一个协程从预先取消的定时等待捕获
-`OperationCancelled`，并输出 `Coroutine cancelled`。
+`OperationCancelled`。两个受保护 Task 输出 `Mutex result: 42`，最后输出 `Coroutine cancelled`。
 
 任何定义协程的翻译单元都要自行导入 `std`，使 `std::coroutine_traits` 和标准协程协议类型
 参与编译。CMP 模块私有导入 `std`，而不是向使用方重新导出整个标准库。
@@ -263,6 +289,15 @@ RunLoop 在主线程驱动 `print_answer()`；短单调时钟定时器到期后�
 - 事件不可移动且必须比所有等待者活得更久；带 pending 等待者析构会终止进程；
 - 不提供 reset、可取消注销、值或隐式 Scheduler 转移。
 
+`AsyncMutex` 遵循以下契约：
+
+- `lock_async()` 返回无分配操作，等待结果是 move-only RAII Guard；
+- 立即取得者 inline 继续，竞争等待者按 FIFO 顺序挂起；
+- Guard 析构恰好交接一次所有权，并在该线程恢复下一个等待者；
+- 所有权不绑定线程，内部状态锁不会在恢复用户协程时持有；
+- mutex 必须比所有 Guard 和等待者活得更久；持有或排队时析构会终止；
+- 不提供手工 unlock、try-lock、取消、递归或隐式 Scheduler 转移。
+
 `RunLoop` 和 `Scheduler` 遵循以下契约：
 
 - RunLoop 既不能复制也不能移动；它的身份是所有关联 Scheduler 的生命周期锚点；
@@ -310,7 +345,7 @@ CMP 名称中的 `C` 与 Go 运行时中的 `G` 相呼应，但这只说明命�
 5. 处理不可避免的阻塞工作的专用线程池；
 6. 结果适配器和可选的协程帧分配策略。
 
-Task、RunLoop、`when_all`、TaskGroup 与 OneShotEvent 已经形成真实的公共边界，因此分别位于
+Task、RunLoop、`when_all`、TaskGroup、OneShotEvent 与 AsyncMutex 已经形成真实的公共边界，因此分别位于
 模块分区中。只有其他已实现 API 确实需要新边界时，才继续增加模块分区或实现单元。
 
 ## 验证
@@ -324,11 +359,11 @@ cd examples/basic
 mcpp run
 ```
 
-预期结果是库构建成功、五个二进制中的 69 项测试全部通过，并且示例依次输出
+预期结果是库构建成功、六个二进制中的 74 项测试全部通过，并且示例依次输出
 `Coroutine result: 42`、`Concurrent result: 42`、`Task group result: 42`、
-`Event signalled` 和 `Coroutine cancelled` 后以状态 0 退出。测试分别执行一百万次立即完成
+`Event signalled`、`Mutex result: 42` 和 `Coroutine cancelled` 后以状态 0 退出。测试分别执行一百万次立即完成
 的 Task、十万次立即双 Task 变参汇合、五万次立即双 Task vector 汇合、五万次 eager TaskGroup
-完成、五万次事件等待者、十万次显式
+完成、五万次事件等待者、五万次 mutex 交接、十万次显式
 调度、十万次立即 Timer 和十万次预先取消的定时等待，用于检查对称转移以及所有汇合或队列
 路径都不会增长原生调用栈。当前 Windows LLVM 工具链不会
 生成 GNU depfile；如果模块接口包含的文件发生变化，增量构建可能复用旧的 BMI 或目标文件。

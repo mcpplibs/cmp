@@ -4,7 +4,8 @@
 
 CMP 是使用 mcpp 构建的 C++23 Modules 协程运行时库。当前公开核心包括惰性、唯一所有权的
 `Task<T>`，支持变参与同类型动态集合的结构化 `when_all()`，eager 可变结构化 `TaskGroup`，
-无分配一次性 `OneShotEvent`，单消费者 `RunLoop`，以及可复制的 `RunLoop::Scheduler`。Scheduler 支持普通
+无分配一次性 `OneShotEvent`、RAII `AsyncMutex`，单消费者 `RunLoop`，以及可复制的
+`RunLoop::Scheduler`。Scheduler 支持普通
 `schedule()`、相对期限 `schedule_after()` 和绝对期限 `schedule_at()`；定时等待可显式接收
 `std::stop_token`，取消获胜时抛出 `OperationCancelled`。由 Scheduler 入队的 continuation
 均由调用 `RunLoop::run()` 的线程恢复。
@@ -15,9 +16,9 @@ LLVM 22.1.8，测试依赖为 `compat.gtest` 1.15.2。实现位于 `src/`，契�
 
 ## 当前目标与状态
 
-当前分支为 `main`，已与远端同步到 PR #8 的 squash 合并提交 `26ae032`。TaskGroup 与最小
-一次性协程事件 `OneShotEvent` 均已完成实现、本地严格验证、独立示例、三语文档和三平台
-PR 交付；合并状态文档更新和最终 main CI 尚待完成。
+当前分支为 `feature/async-mutex-v1`，基于已与远端同步的 `main` 提交 `f8ae3e5`。OneShotEvent
+v1 已完整合并并通过最终 main CI；当前阶段设计协程感知的 `AsyncMutex`，设计和实施计划已
+完成；实现、5 项契约测试、独立示例、三语文档和本地严格验证均已完成，尚未提交或推送。
 
 ## 已完成工作
 
@@ -61,6 +62,11 @@ PR 交付；合并状态文档更新和最终 main CI 尚待完成。
   acquire-release 顺序发布 set 前写入。
 - 新增 7 项事件契约测试，覆盖预先 set、多个等待者、setter 线程、1,000 次注册竞态、显式
   返回 RunLoop 和 5 万等待者栈安全。
+- 已导出不可移动的 `AsyncMutex`；`lock_async()` 无分配返回 move-only RAII Guard，竞争等待者
+  按 FIFO 顺序交接，ownership 不绑定线程。
+- 一个标准 mutex 保护 locked/head/tail；无分配 thread-local trampoline 将立即释放形成的嵌套
+  resume 展平成循环，5 万次竞争交接不增长原生栈。
+- 新增 5 项 AsyncMutex 契约测试，覆盖 Guard move、异常释放、FIFO、跨线程 ownership 和栈安全。
 
 ## 重要决策
 
@@ -82,6 +88,8 @@ PR 交付；合并状态文档更新和最终 main CI 尚待完成。
   `cancel_and_join()`、结果 future、scheduler 选择或 completed-wrapper 回收。
 - OneShotEvent 只有单向 unset→set 状态，不提供 reset、代际、取消注销、值或隐式 Scheduler
   转移；需要复用事件或 channel 时再设计独立状态机。
+- AsyncMutex v1 只暴露 RAII acquisition，不提供手工 unlock、try-lock、取消注销、递归锁或
+  scheduler 选择；只有基准证明短状态锁成为瓶颈后才考虑原子双队列。
 
 ## 修改 / 重要文件
 
@@ -89,12 +97,14 @@ PR 交付；合并状态文档更新和最终 main CI 尚待完成。
 - `src/when_all.cppm`：join coroutine、原子计数哨兵和 variadic/vector 公开 API。
 - `src/task_group.cppm`：eager void 子任务作用域、单次 join、显式 stop 通道和生命周期状态机。
 - `src/one_shot_event.cppm`：无分配一次性事件和原子等待者链表。
-- `src/cmp.cppm`：导出 `:when_all`、`:task_group` 与 `:one_shot_event` 分区。
+- `src/async_mutex.cppm`：RAII Guard、FIFO 等待队列和栈安全交接 trampoline。
+- `src/cmp.cppm`：导出 `:when_all`、`:task_group`、`:one_shot_event` 与 `:async_mutex` 分区。
 - `tests/run_loop_test.cpp`：Cancellation v1 契约、边界、竞态和栈安全测试。
 - `tests/when_all_test.cpp`：变参/vector 的结构化所有权、结果、异常、线程和栈安全测试。
 - `tests/task_group_test.cpp`：TaskGroup 接纳、join、异常、取消、线程和栈安全测试。
 - `tests/one_shot_event_test.cpp`：事件发布、注册竞态、线程和栈安全测试。
-- `examples/basic/src/main.cpp`：协程内正常、并发、TaskGroup、event 和预取消输出示例。
+- `tests/async_mutex_test.cpp`：Guard、FIFO、异常、跨线程和交接栈安全测试。
+- `examples/basic/src/main.cpp`：协程内正常、并发、TaskGroup、event、mutex 和预取消输出示例。
 - `README.md`、`README.zh.md`、`README.zh.hant.md`：当前 API、示例和路线图。
 - `docs/architecture.md`、`docs/architecture.zh.md`、`docs/architecture.zh.hant.md`：实现契约、
   边界与验证基线。
@@ -108,6 +118,8 @@ PR 交付；合并状态文档更新和最终 main CI 尚待完成。
 - `docs/superpowers/plans/2026-08-24-cmp-task-group-v1.md`：当前 TaskGroup v1 实施清单。
 - `docs/superpowers/specs/2026-08-24-cmp-one-shot-event-v1-design.md`：当前 OneShotEvent v1 设计。
 - `docs/superpowers/plans/2026-08-24-cmp-one-shot-event-v1.md`：当前 OneShotEvent v1 实施清单。
+- `docs/superpowers/specs/2026-08-24-cmp-async-mutex-v1-design.md`：当前 AsyncMutex v1 设计。
+- `docs/superpowers/plans/2026-08-24-cmp-async-mutex-v1.md`：当前 AsyncMutex v1 实施清单。
 - `.agent/HANDOFF.md`：本文件。
 
 ## 验证情况
@@ -168,7 +180,12 @@ PR 交付；合并状态文档更新和最终 main CI 尚待完成。
 - OneShotEvent v1 本地实现与验证阶段完成于 2026-08-24 02:37:41 CST。
 - PR #8 head `02efa37` 的 Linux x86_64、macOS arm64、Windows x86_64 CI 均通过 69 项测试和
   独立示例；已 squash 合并为 `26ae032`，功能分支保留。
-- 本地 `main` 已快进同步到 `26ae032`。
+- 本地与远端 `main` 已同步到交接提交 `f8ae3e5`；该提交的 Linux run `32658884971`、macOS
+  run `32658884957`、Windows run `32658884967` 均成功。
+- AsyncMutex 新测试先因缺少公开类型按预期编译失败；实现后聚焦 Dev 测试 5/5 通过。
+- AsyncMutex 阶段 Dev/Release 严格无缓存构建通过；两个 profile 的完整测试均为 74/74。
+- Release 的完整 mutex 套件额外连续执行 50 轮，跨线程 ownership 测试 5,000 轮，全部通过。
+- 更新后的独立示例运行成功，并在取消输出前增加 `Mutex result: 42`。
 
 ## 已知问题 / 风险
 
@@ -184,13 +201,14 @@ PR 交付；合并状态文档更新和最终 main CI 尚待完成。
   回收机制。
 - TaskGroup 遗漏 join 会确定性终止，且取消不会自动注入子任务；这两项均是已记录的公开契约。
 - OneShotEvent 会在带 pending 等待者析构时终止；等待者帧必须存活到 set，v1 不提供取消注销。
+- AsyncMutex 会在仍持有或有 pending 等待者时析构终止；排队协程帧必须存活到取得 Guard。
 
 ## 剩余工作
 
-1. 提交并推送本次合并状态更新，确认最终 `main` 三平台 CI。
-2. 读取本机时间；未到停止窗口则继续下一阶段设计。
+1. 完成最终 diff/格式自审并记录本阶段本机时间。
+2. 若未进入停止窗口，提交、推送并完成 PR 三平台交付与 main 同步。
 
 ## 推荐下一步
 
-下一步先验证合并后的 `main`；随后只设计一个边界独立的后续模块，不把 reusable event、channel
-或多 worker 调度混入同一阶段。
+下一步先读取本机时间；若仍未进入停止窗口则交付当前 AsyncMutex，不加入手工 unlock、取消
+注销或 lock-free 双队列。

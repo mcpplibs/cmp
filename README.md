@@ -17,8 +17,8 @@
 
 > [!IMPORTANT]
 > CMP provides a lazy, single-consumer `Task<T>` / `Task<void>`, structured variadic and vector
-> `when_all()`, an eager structured `TaskGroup`, a one-way `OneShotEvent`, and a caller-thread
-> `RunLoop` with explicit and monotonic timed scheduling. Timed waits and TaskGroup children can
+> `when_all()`, an eager structured `TaskGroup`, a one-way `OneShotEvent`, an RAII `AsyncMutex`, and
+> a caller-thread `RunLoop` with explicit and monotonic timed scheduling. Timed waits and TaskGroup children can
 > use explicit cooperative cancellation with `std::stop_token`; asynchronous I/O and detached
 > execution are not implemented.
 
@@ -77,7 +77,8 @@ mcpp run
 The example prints `Coroutine result: 42`, joins two timed Tasks and prints
 `Concurrent result: 42`, eagerly spawns two scoped Tasks and prints `Task group result: 42`, awaits
 a one-time notification and prints `Event signalled`, then prints `Coroutine cancelled` from a
-pre-cancelled timed wait. All messages come from `Task<void>` coroutines.
+pre-cancelled timed wait. It also prints `Mutex result: 42` after two guarded Tasks. All messages
+come from `Task<void>` coroutines.
 
 ## Current API
 
@@ -87,6 +88,7 @@ import mcpplibs.cmp;
 
 using mcpplibs::cmp::Task;
 using mcpplibs::cmp::RunLoop;
+using mcpplibs::cmp::AsyncMutex;
 using mcpplibs::cmp::OperationCancelled;
 using mcpplibs::cmp::OneShotEvent;
 using mcpplibs::cmp::TaskGroup;
@@ -158,6 +160,28 @@ Task<void> print_event(RunLoop::Scheduler scheduler) {
     co_return;
 }
 
+Task<void> add_locked(
+    RunLoop::Scheduler scheduler,
+    AsyncMutex& mutex,
+    int value,
+    int& total) {
+    co_await scheduler.schedule();
+    auto guard = co_await mutex.lock_async();
+    total += value;
+    co_return;
+}
+
+Task<void> print_mutex(RunLoop::Scheduler scheduler) {
+    int total { 0 };
+    AsyncMutex mutex {};
+    TaskGroup group {};
+    group.spawn(add_locked(scheduler, mutex, 20, total));
+    group.spawn(add_locked(scheduler, mutex, 22, total));
+    co_await group.join();
+    std::println("Mutex result: {}", total);
+    co_return;
+}
+
 Task<void> print_cancellation(RunLoop::Scheduler scheduler, std::stop_token token) {
     try {
         co_await scheduler.schedule_after(1s, token);
@@ -173,6 +197,7 @@ int main() {
     loop.run(print_concurrent_results(loop.get_scheduler()));
     loop.run(print_task_group(loop.get_scheduler()));
     loop.run(print_event(loop.get_scheduler()));
+    loop.run(print_mutex(loop.get_scheduler()));
 
     std::stop_source source {};
     source.request_stop();
@@ -205,6 +230,11 @@ child results must be returned.
 `set()` permanently sets it and resumes every registered waiter exactly once on the setter thread;
 later waits continue inline and later sets do nothing. The event is immovable and must outlive its
 waiters. It deliberately has no reset or implicit Scheduler transfer.
+
+`auto guard = co_await mutex.lock_async()` acquires `AsyncMutex` without allocating a waiter and
+releases it through RAII. Contended waiters acquire in FIFO order and resume on the releasing
+thread; ownership is not tied to a thread. The mutex must outlive every guard and queued waiter.
+v1 exposes no manual unlock, try-lock, cancellation, or implicit Scheduler transfer.
 
 A translation unit that defines a coroutine must import `std` so the compiler can see the standard
 coroutine protocol types. CMP imports `std` privately and does not re-export the whole standard
@@ -240,11 +270,13 @@ await the desired Scheduler to return to its RunLoop.
 ├── src/when_all.cppm         # structured concurrent Task join
 ├── src/task_group.cppm       # eager mutable structured Task scope
 ├── src/one_shot_event.cppm   # allocation-free one-time notification
+├── src/async_mutex.cppm      # FIFO coroutine-aware RAII mutex
 ├── tests/cmp_test.cpp        # Task contract and lifetime tests
 ├── tests/run_loop_test.cpp   # scheduler, boundary, and threading tests
 ├── tests/when_all_test.cpp   # join ownership, result, and race tests
 ├── tests/task_group_test.cpp # mutable scope lifetime and race tests
 ├── tests/one_shot_event_test.cpp # event publication and race tests
+├── tests/async_mutex_test.cpp # mutex ownership and hand-off tests
 ├── examples/basic/           # standalone path-dependency consumer
 ├── docs/architecture.md      # current structure, boundaries, and evolution
 └── .github/workflows/        # Linux, macOS, and Windows CI
@@ -277,9 +309,9 @@ Runtime work is split into independently reviewable phases:
 1. package identity and importable-module bootstrap — implemented;
 2. coroutine task and lifetime semantics — initial `Task` implemented;
 3. a root runner and minimal single-thread scheduler — initially implemented;
-4. monotonic Timer v1, cancellable timed waits, variadic/vector joins, TaskGroup v1, and
-   OneShotEvent v1 — implemented; recursive scope admission, broader cancellation propagation,
-   and reusable wake-up paths remain;
+4. monotonic Timer v1, cancellable timed waits, variadic/vector joins, TaskGroup v1, OneShotEvent
+   v1, and AsyncMutex v1 — implemented; recursive scope admission, broader cancellation
+   propagation, and reusable wake-up paths remain;
 5. multi-worker scheduling and work stealing;
 6. asynchronous I/O integration and a blocking pool.
 

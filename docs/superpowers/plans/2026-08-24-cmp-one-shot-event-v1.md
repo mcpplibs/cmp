@@ -3,7 +3,7 @@
 **Date:** 2026-08-24
 **Design:** `docs/superpowers/specs/2026-08-24-cmp-one-shot-event-v1-design.md`
 **Branch:** `feature/one-shot-event-v1`
-**Status:** Implemented; local verification complete, delivery pending
+**Status:** Complete; merged via PR #8
 
 ## 1. Add failing public-contract tests
 
@@ -34,9 +34,10 @@ architecture languages describe the same API and boundaries.
 
 ## 4. Verify and deliver
 
-**In progress.** Strict cache-off Dev and Release builds and 69/69 tests pass. The Release event
-suite passes 50/50 repeats, covering 50,000 registration races, and cross-thread resumption passes
-5,000/5,000. Commit, PR, three-platform CI, merge, and main synchronization remain.
+**Complete.** Strict cache-off Dev and Release builds and 69/69 tests pass. The Release event suite
+passes 50/50 repeats, covering 50,000 registration races, and cross-thread resumption passes
+5,000/5,000. PR #8 passed Linux, macOS, and Windows CI and was squash-merged as `26ae032`; local
+`main` is synchronized.
 
 - Run strict cache-off Dev and Release builds and all tests.
 - Repeat focused Release registration/set races and self-review memory ordering and lifetime edges.

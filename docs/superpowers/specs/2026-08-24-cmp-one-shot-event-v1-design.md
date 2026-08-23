@@ -1,7 +1,7 @@
 # CMP OneShotEvent v1 Design
 
 **Date:** 2026-08-24
-**Status:** Implemented; local verification complete, delivery pending
+**Status:** Implemented and merged via PR #8
 **Base:** `main` at `a9183fc`
 **Branch:** `feature/one-shot-event-v1`
 

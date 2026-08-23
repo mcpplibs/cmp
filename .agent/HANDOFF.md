@@ -14,9 +14,9 @@ LLVM 22.1.8，测试依赖为 `compat.gtest` 1.15.2。实现位于 `src/`，契�
 
 ## 当前目标与状态
 
-当前分支为 `feature/cancellation-v1`，基于已合并 Timer v1 的 `main` 提交 `c06705c`。
-Cancellation v1 已完成实现、本地 Dev/Release 验证、重复竞态验证、独立示例和三语文档同步。
-功能提交 `3a997ab` 已推送，Linux、macOS、Windows 手动 CI 全部通过；尚未创建或合并 PR。
+当前分支为 `main`，已包含 PR #4 的 squash 合并提交 `ad80fb0`。Cancellation v1 已完成实现、
+本地 Dev/Release 验证、重复竞态验证、独立示例和三语文档同步；PR 最终 head 和合并后的
+`main` 均通过 Linux、macOS、Windows CI。本地与远端 `main` 已同步，远端功能分支仍保留。
 
 ## 已完成工作
 
@@ -65,9 +65,11 @@ Cancellation v1 已完成实现、本地 Dev/Release 验证、重复竞态验证
   `Coroutine cancelled`。
 - 功能提交 `3a997ab` 的 Linux x86_64、macOS arm64、Windows x86_64 手动 CI 均通过构建、
   38 项测试和独立示例。
+- PR #4 最终 head `67d0efc` 的三平台检查全部通过；合并提交 `ad80fb0` 触发的 `main` 三平台
+  CI 也全部通过。
 - mcpp 仍提示本机 SubOS 缺少 `subos_info`，但工具链解析为 LLVM 22.1.8，未影响构建或运行。
-- 已按用户授权提交并推送当前功能分支，并手动触发三套 CI；未创建 PR、执行合并或修改其他
-  远端资源。
+- 已按用户授权提交、推送、创建 PR #4 并 squash 合并；未删除远端功能分支或修改其他远端
+  资源。
 
 ## 已知问题 / 风险
 
@@ -80,11 +82,10 @@ Cancellation v1 已完成实现、本地 Dev/Release 验证、重复竞态验证
 
 ## 剩余工作
 
-1. 用户决定是否创建 Cancellation v1 PR。
-2. PR 创建后确认针对最终 head 的三平台检查仍全部通过。
-3. 只有用户另行明确授权后才合并。
+1. Cancellation v1 阶段没有剩余实现工作。
+2. 下一阶段从最新 `main` 创建新分支，再独立设计结构化任务作用域与取消传播。
 
 ## 推荐下一步
 
-下一步是按用户授权创建 Cancellation v1 PR，并让 PR 检查复验最终 head。结构化任务作用域
-与取消传播留到后续独立设计，不在本分支继续扩展。
+下一步是从最新 `main` 创建新分支，设计结构化任务作用域与取消传播；不要继续在已经合并的
+Cancellation v1 分支上开发。

@@ -3,7 +3,8 @@
 ## 项目概览
 
 CMP 是使用 mcpp 构建的 C++23 Modules 协程运行时库。当前公开核心包括惰性、唯一所有权的
-`Task<T>`，单消费者 `RunLoop`，以及可复制的 `RunLoop::Scheduler`。Scheduler 支持普通
+`Task<T>`，支持变参与同类型动态集合的结构化 `when_all()`，单消费者 `RunLoop`，以及可复制
+的 `RunLoop::Scheduler`。Scheduler 支持普通
 `schedule()`、相对期限 `schedule_after()` 和绝对期限 `schedule_at()`；定时等待可显式接收
 `std::stop_token`，取消获胜时抛出 `OperationCancelled`。由 Scheduler 入队的 continuation
 均由调用 `RunLoop::run()` 的线程恢复。
@@ -14,9 +15,9 @@ LLVM 22.1.8，测试依赖为 `compat.gtest` 1.15.2。实现位于 `src/`，契�
 
 ## 当前目标与状态
 
-当前分支为 `main`，已包含 PR #5 的 squash 合并提交 `d7dd418`，本地与远端已同步。
-结构化并发汇合 `when_all` v1 已完成设计、实现、契约测试、独立示例、三语公开文档、本地
-Dev/Release 验证和三平台 PR CI。远端功能分支保留，下一阶段尚未创建分支。
+当前分支为 `feature/when-all-range`，基于已与远端同步的 `main` 提交 `724050c`。variadic
+`when_all` v1 已通过 PR #5 合并；运行时同类型 Task 集合的
+`when_all(std::vector<Task<T>>)` 已完成实现、本地验证、示例和三语文档，等待提交与 PR 交付。
 
 ## 已完成工作
 
@@ -38,6 +39,13 @@ Dev/Release 验证和三平台 PR CI。远端功能分支保留，下一阶段�
   占位、同步完成和跨线程完成。
 - 新增 8 项汇合契约测试、10 万次同步汇合栈安全压力，以及独立 consumer 的并发结果打印。
 - README 与架构说明的英文、简体中文、繁体中文事实已同步到 `when_all` v1。
+- 已导出 `when_all(std::vector<Task<T>>)`；支持空集合、move-only 与 void 结果、按索引保序、
+  全部收尾后按索引传播首个异常，以及同步和跨线程完成。
+- 范围 awaiter 复用现有 `JoinTask` / `JoinCounter`，在任何子任务启动前预留全部 wrapper 空间，
+  不增加依赖、任意 range 抽象或公开生命周期接口。
+- 新增 7 项动态集合契约测试和 5 万次立即汇合栈安全压力；独立示例改为在协程内构造并汇合
+  `std::vector<Task<int>>`。
+- README、架构说明、设计文档和实施计划已同步动态集合 API 与 53 项测试基线。
 
 ## 重要决策
 
@@ -50,15 +58,16 @@ Dev/Release 验证和三平台 PR CI。远端功能分支保留，下一阶段�
 - 不增加后台线程、依赖、公开 Timer 句柄、TaskGroup、detached 或测试专用公共接口。
 - `when_all` v1 使用“子任务数 + 1”原子计数哨兵，覆盖同步完成和跨线程完成竞态。
 - `when_all` 等待全部子任务收尾后再传播异常，不允许因 fail-fast 提前销毁仍在运行的帧。
-- 当前阶段只实现固定参数包汇合；动态 TaskGroup、spawn 和隐式取消传播继续独立设计。
+- `when_all` v1 先实现固定参数包汇合；动态 TaskGroup、spawn 和隐式取消传播继续独立设计。
+- 范围阶段只接受标准 `std::vector<Task<T>>`，不为尚无需求的任意 range 增加模板层。
 
 ## 修改 / 重要文件
 
 - `src/run_loop.cppm`：公开异常、token 重载、取消状态、回调和显式 Timer 堆。
-- `src/when_all.cppm`：join coroutine、原子计数哨兵和 variadic 公开 API。
+- `src/when_all.cppm`：join coroutine、原子计数哨兵和 variadic/vector 公开 API。
 - `src/cmp.cppm`：导出 `:when_all` 分区。
 - `tests/run_loop_test.cpp`：Cancellation v1 契约、边界、竞态和栈安全测试。
-- `tests/when_all_test.cpp`：结构化所有权、结果、异常、线程和栈安全测试。
+- `tests/when_all_test.cpp`：变参/vector 的结构化所有权、结果、异常、线程和栈安全测试。
 - `examples/basic/src/main.cpp`：协程内正常输出和预取消输出示例。
 - `README.md`、`README.zh.md`、`README.zh.hant.md`：当前 API、示例和路线图。
 - `docs/architecture.md`、`docs/architecture.zh.md`、`docs/architecture.zh.hant.md`：实现契约、
@@ -67,6 +76,8 @@ Dev/Release 验证和三平台 PR CI。远端功能分支保留，下一阶段�
 - `docs/superpowers/plans/2026-08-23-cmp-cancellation-v1.md`：已完成实施清单和本地结果。
 - `docs/superpowers/specs/2026-08-24-cmp-when-all-v1-design.md`：当前汇合 API 设计。
 - `docs/superpowers/plans/2026-08-24-cmp-when-all-v1.md`：当前实施与交付清单。
+- `docs/superpowers/specs/2026-08-24-cmp-when-all-range-design.md`：当前动态集合设计。
+- `docs/superpowers/plans/2026-08-24-cmp-when-all-range.md`：当前动态集合实施清单。
 - `.agent/HANDOFF.md`：本文件。
 
 ## 验证情况
@@ -91,6 +102,13 @@ Dev/Release 验证和三平台 PR CI。远端功能分支保留，下一阶段�
 - 更新后的独立示例构建运行通过并输出三行预期结果。
 - PR #5 head `d6ea2a8` 的 Linux x86_64、macOS arm64、Windows x86_64 CI 均通过构建、
   46 项测试和独立示例；已 squash 合并为 `d7dd418`。
+- vector 新测试先因缺少匹配重载按预期编译失败；实现后聚焦测试 15/15 通过。
+- Dev 与 Release 严格无缓存构建通过；两个 profile 的完整测试均为 53/53（8 个 Task、
+  30 个 RunLoop、15 个 when_all）。
+- Release 的完整 `when_all` 15 项套件额外连续执行 50 次，全部通过。
+- 动态集合独立示例运行通过，依次输出 `Coroutine result: 42`、`Concurrent result: 42` 和
+  `Coroutine cancelled`。
+- 本阶段本地验证完成于 2026-08-24 01:27:08 CST；远端三平台 CI 尚待提交与 PR 后验证。
 
 ## 已知问题 / 风险
 
@@ -100,15 +118,16 @@ Dev/Release 验证和三平台 PR CI。远端功能分支保留，下一阶段�
 - 外部销毁已经发布到 RunLoop 的协程帧仍不受支持；Cancellation v1 不提供 detached 安全。
 - 取消只覆盖 Scheduler 定时等待，不会中断阻塞调用，也不会自动传播到任意子 Task 或外部
   awaiter。
-- pending `when_all` 仍遵循现有 Task 边界：子任务发布 continuation 后，外部提前销毁聚合
+- pending `when_all`（包括 vector 重载）仍遵循现有 Task 边界：子任务发布 continuation 后，外部提前销毁聚合
   帧属于无效使用。
 
 ## 剩余工作
 
-1. `when_all` v1 没有剩余实现或交付工作。
-2. 下一阶段从最新 `main` 新建分支，独立设计动态结构化任务作用域与取消传播。
+1. 完成最终差异检查并以简短中文提交信息提交、推送功能分支。
+2. 创建 PR，等待 Linux、macOS、Windows 三平台检查全部通过后 squash 合并。
+3. 快进同步本地 `main`，更新合并状态并验证 `main` CI。
 
 ## 推荐下一步
 
-下一步从最新 `main` 创建新分支，先定义动态任务作用域的 close/join 生命周期、异常策略和
-`std::stop_token` 传播边界；不要直接扩展已合并的 `when_all` 分支。
+下一步交付本阶段 PR；合并后再独立设计可变结构化任务作用域，不在当前 vector API 中提前
+加入 `spawn`、隐式取消传播或 detached 生命周期。

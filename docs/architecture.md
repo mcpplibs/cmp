@@ -5,8 +5,8 @@
 ## Current status
 
 CMP is a C++23 module project with a small coroutine execution core. The root module exports a
-lazy, single-consumer `mcpplibs::cmp::Task<T>`, structured variadic `when_all()`, `RunLoop`, and its
-copyable `Scheduler` handle. `when_all()` starts and owns multiple Tasks until all complete.
+lazy, single-consumer `mcpplibs::cmp::Task<T>`, structured variadic/vector `when_all()`, `RunLoop`,
+and its copyable `Scheduler` handle. `when_all()` starts and owns multiple Tasks until all complete.
 `RunLoop::run()` is the public root execution boundary, while `Scheduler::schedule()` explicitly
 returns a suspended coroutine to that loop. `schedule_after()` and `schedule_at()` add relative
 and absolute `steady_clock` deadlines without a timer thread; overloads accepting
@@ -140,10 +140,11 @@ Task<int> delayed_value(
 }
 
 Task<void> print_concurrent_results(RunLoop::Scheduler scheduler) {
-    auto [first, second] = co_await when_all(
-        delayed_value(scheduler, 10ms, 20),
-        delayed_value(scheduler, 1ms, 22));
-    std::println("Concurrent result: {}", first + second);
+    std::vector<Task<int>> tasks {};
+    tasks.emplace_back(delayed_value(scheduler, 10ms, 20));
+    tasks.emplace_back(delayed_value(scheduler, 1ms, 22));
+    auto values = co_await when_all(std::move(tasks));
+    std::println("Concurrent result: {}", values[0] + values[1]);
     co_return;
 }
 
@@ -199,6 +200,7 @@ contract violation.
 - awaiting it starts inputs from left to right without waiting for earlier suspended inputs;
 - every child reaches a terminal state before the parent resumes;
 - results retain parameter order in a `std::tuple`, with `Task<void>` mapped to `std::monostate`;
+- a `std::vector<Task<T>>` input produces a same-sized result vector in index order;
 - move-only results are supported;
 - after all children finish, the first child exception in parameter order is rethrown;
 - an atomic count-plus-sentinel protocol covers immediate and cross-thread completion exactly once;
@@ -272,11 +274,11 @@ cd examples/basic
 mcpp run
 ```
 
-The expected result is a successful library build, 46 passing tests across three binaries, and an
+The expected result is a successful library build, 53 passing tests across three binaries, and an
 example that prints `Coroutine result: 42`, `Concurrent result: 42`, then `Coroutine cancelled`
 and exits with status 0. Tests perform one million immediate Task completions, 100,000 immediate
-two-Task joins, 100,000 explicit schedules, 100,000 immediate timers, and 100,000 pre-cancelled
-timed waits. These check that symmetric transfer and all joined or queued paths do not grow the
-native call stack. The current Windows LLVM toolchain does not emit GNU depfiles. If a file included
-by a module interface changes, an incremental build can reuse an older BMI or object;
-`--cache=off` is used for a full local verification.
+two-Task joins, 50,000 immediate two-Task vector joins, 100,000 explicit schedules, 100,000
+immediate timers, and 100,000 pre-cancelled timed waits. These check that symmetric transfer and
+all joined or queued paths do not grow the native call stack. The current Windows LLVM toolchain
+does not emit GNU depfiles. If a file included by a module interface changes, an incremental build
+can reuse an older BMI or object; `--cache=off` is used for a full local verification.

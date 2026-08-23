@@ -5,8 +5,8 @@
 ## 当前状态
 
 CMP 是一个具备小型协程执行核心的 C++23 模块项目。根模块导出懒启动、单消费者的
-`mcpplibs::cmp::Task<T>`、结构化变参 `when_all()`、`RunLoop` 及其可复制的 `Scheduler`
-句柄。`when_all()` 会启动并持有多个 Task，直到全部结束。`RunLoop::run()` 是公共根任务
+`mcpplibs::cmp::Task<T>`、结构化变参/vector `when_all()`、`RunLoop` 及其可复制的
+`Scheduler` 句柄。`when_all()` 会启动并持有多个 Task，直到全部结束。`RunLoop::run()` 是公共根任务
 执行边界，`Scheduler::schedule()` 用于显式地把挂起协程送回对应运行循环。
 `schedule_after()` 和 `schedule_at()` 在没有定时线程的情况下提供相对和绝对的
 `steady_clock` 期限；接受 `std::stop_token` 的重载使这些等待可以协作式取消。
@@ -134,10 +134,11 @@ Task<int> delayed_value(
 }
 
 Task<void> print_concurrent_results(RunLoop::Scheduler scheduler) {
-    auto [first, second] = co_await when_all(
-        delayed_value(scheduler, 10ms, 20),
-        delayed_value(scheduler, 1ms, 22));
-    std::println("Concurrent result: {}", first + second);
+    std::vector<Task<int>> tasks {};
+    tasks.emplace_back(delayed_value(scheduler, 10ms, 20));
+    tasks.emplace_back(delayed_value(scheduler, 1ms, 22));
+    auto values = co_await when_all(std::move(tasks));
+    std::println("Concurrent result: {}", values[0] + values[1]);
     co_return;
 }
 
@@ -190,6 +191,7 @@ RunLoop 在主线程驱动 `print_answer()`；短单调时钟定时器到期后�
 - 等待时从左到右启动输入，不等待较早挂起的输入完成；
 - 所有子任务都到达终态后才恢复父任务；
 - 结果按参数顺序组成 `std::tuple`，其中 `Task<void>` 映射为 `std::monostate`；
+- `std::vector<Task<T>>` 输入按索引顺序产生相同数量的结果 vector；
 - 支持 move-only 结果；
 - 全部子任务结束后，按参数顺序重新抛出第一个子任务异常；
 - 原子“计数 + 哨兵”协议保证立即完成和跨线程完成只恢复一次；
@@ -256,9 +258,10 @@ cd examples/basic
 mcpp run
 ```
 
-预期结果是库构建成功、三个二进制中的 46 项测试全部通过，并且示例依次输出
+预期结果是库构建成功、三个二进制中的 53 项测试全部通过，并且示例依次输出
 `Coroutine result: 42`、`Concurrent result: 42` 和 `Coroutine cancelled` 后以状态 0
-退出。测试分别执行一百万次立即完成的 Task、十万次立即双 Task 汇合、十万次显式调度、
-十万次立即 Timer 和十万次预先取消的定时等待，用于检查对称转移以及所有汇合或队列路径都
-不会增长原生调用栈。当前 Windows LLVM 工具链不会生成 GNU depfile；如果模块接口包含的
-文件发生变化，增量构建可能复用旧的 BMI 或目标文件。完整复验时使用 `--cache=off`。
+退出。测试分别执行一百万次立即完成的 Task、十万次立即双 Task 变参汇合、五万次立即双
+Task vector 汇合、十万次显式调度、十万次立即 Timer 和十万次预先取消的定时等待，用于
+检查对称转移以及所有汇合或队列路径都不会增长原生调用栈。当前 Windows LLVM 工具链不会
+生成 GNU depfile；如果模块接口包含的文件发生变化，增量构建可能复用旧的 BMI 或目标文件。
+完整复验时使用 `--cache=off`。

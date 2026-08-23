@@ -126,6 +126,20 @@ Task<int> repeat_immediate_join(int count) {
     co_return sum;
 }
 
+Task<int> repeat_immediate_range_join(int count) {
+    int sum { 0 };
+
+    for (int index { 0 }; index < count; ++index) {
+        std::vector<Task<int>> tasks {};
+        tasks.emplace_back(complete_immediately(1));
+        tasks.emplace_back(complete_immediately(2));
+        auto values = co_await when_all(std::move(tasks));
+        sum += values[0] + values[1];
+    }
+
+    co_return sum;
+}
+
 TEST(CmpWhenAllTest, IsLazyAndReturnsResultsInParameterOrder) {
     RunLoop loop {};
     bool firstStarted { false };
@@ -235,6 +249,128 @@ TEST(CmpWhenAllTest, ImmediateCompletionDoesNotGrowTheNativeStack) {
     RunLoop loop {};
 
     EXPECT_EQ(loop.run(repeat_immediate_join(JOIN_COUNT)), JOIN_COUNT * 3);
+}
+
+TEST(CmpWhenAllTest, RangeOwnsAndDestroysUnawaitedChildFrames) {
+    int liveCount { 0 };
+
+    {
+        std::vector<Task<void>> tasks {};
+        tasks.emplace_back(hold_token(LifetimeToken { liveCount }));
+        tasks.emplace_back(hold_token(LifetimeToken { liveCount }));
+        auto aggregate = when_all(std::move(tasks));
+        static_cast<void>(aggregate);
+        EXPECT_EQ(liveCount, 2);
+    }
+
+    EXPECT_EQ(liveCount, 0);
+}
+
+TEST(CmpWhenAllTest, EmptyRangeCompletesWithAnEmptyVector) {
+    RunLoop loop {};
+    std::vector<Task<int>> tasks {};
+    auto results = loop.run(when_all(std::move(tasks)));
+
+    static_assert(std::same_as<decltype(results), std::vector<int>>);
+    EXPECT_TRUE(results.empty());
+}
+
+TEST(CmpWhenAllTest, RangeStartsEveryInputAndPreservesIndexOrder) {
+    RunLoop loop {};
+    auto scheduler = loop.get_scheduler();
+    std::vector<int> events {};
+    std::vector<Task<int>> tasks {};
+    tasks.emplace_back(scheduled_value(scheduler, 1, events));
+    tasks.emplace_back(scheduled_value(scheduler, 2, events));
+    tasks.emplace_back(scheduled_value(scheduler, 3, events));
+    auto aggregate = when_all(std::move(tasks));
+
+    EXPECT_TRUE(events.empty());
+
+    const auto results = loop.run(std::move(aggregate));
+
+    EXPECT_EQ(results, (std::vector<int> { 1, 2, 3 }));
+    EXPECT_EQ(events, (std::vector<int> { 1, 2, 3, 11, 12, 13 }));
+}
+
+TEST(CmpWhenAllTest, RangeSupportsMoveOnlyAndVoidResults) {
+    RunLoop loop {};
+    std::vector<Task<std::unique_ptr<int>>> valueTasks {};
+    valueTasks.emplace_back(make_move_only_value(4));
+    valueTasks.emplace_back(make_move_only_value(5));
+
+    auto values = loop.run(when_all(std::move(valueTasks)));
+
+    ASSERT_EQ(values.size(), 2U);
+    ASSERT_NE(values[0], nullptr);
+    ASSERT_NE(values[1], nullptr);
+    EXPECT_EQ(*values[0], 4);
+    EXPECT_EQ(*values[1], 5);
+
+    bool firstCompleted { false };
+    bool secondCompleted { false };
+    std::vector<Task<void>> voidTasks {};
+    voidTasks.emplace_back(complete_void(firstCompleted));
+    voidTasks.emplace_back(complete_void(secondCompleted));
+
+    auto emptyValues = loop.run(when_all(std::move(voidTasks)));
+
+    static_assert(std::same_as<
+        decltype(emptyValues),
+        std::vector<std::monostate>>);
+    EXPECT_EQ(emptyValues.size(), 2U);
+    EXPECT_TRUE(firstCompleted);
+    EXPECT_TRUE(secondCompleted);
+}
+
+TEST(CmpWhenAllTest, RangeWaitsForAllAndRethrowsFirstExceptionByIndex) {
+    RunLoop loop {};
+    auto scheduler = loop.get_scheduler();
+    std::vector<std::string> completions {};
+    std::vector<Task<int>> tasks {};
+    tasks.emplace_back(fail_after_schedules(
+        scheduler,
+        2,
+        "first",
+        completions));
+    tasks.emplace_back(fail_after_schedules(
+        scheduler,
+        1,
+        "second",
+        completions));
+
+    try {
+        static_cast<void>(loop.run(when_all(std::move(tasks))));
+        FAIL() << "range when_all should propagate a child exception";
+    } catch (const std::runtime_error& error) {
+        EXPECT_EQ(error.what(), std::string_view { "first" });
+    }
+
+    EXPECT_EQ(
+        completions,
+        (std::vector<std::string> { "second", "first" }));
+    EXPECT_EQ(loop.run(complete_immediately(8)), 8);
+}
+
+TEST(CmpWhenAllTest, RangePublishesResultsFromDifferentThreads) {
+    RunLoop loop {};
+    std::array<std::jthread, 2> workers {};
+    std::vector<Task<int>> tasks {};
+    tasks.emplace_back(complete_on_new_thread(workers[0], 6));
+    tasks.emplace_back(complete_on_new_thread(workers[1], 7));
+
+    const auto results = loop.run(when_all(std::move(tasks)));
+
+    EXPECT_EQ(results, (std::vector<int> { 6, 7 }));
+}
+
+TEST(CmpWhenAllTest, ImmediateRangeCompletionDoesNotGrowTheNativeStack) {
+    constexpr int JOIN_COUNT { 50'000 };
+    RunLoop loop {};
+
+    EXPECT_EQ(
+        loop.run(repeat_immediate_range_join(JOIN_COUNT)),
+        JOIN_COUNT * 3);
 }
 
 }  // namespace

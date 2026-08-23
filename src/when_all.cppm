@@ -209,6 +209,58 @@ public:
     }
 };
 
+template<typename Result>
+class RangeWhenAllAwaiter final {
+private:
+    JoinCounter counter_;
+    std::vector<JoinTask<Result>> tasks_ {};
+
+public:
+    explicit RangeWhenAllAwaiter(std::vector<Task<Result>> tasks)
+        : counter_ { tasks.size() } {
+        // 先取得全部容器空间，失败时还没有子任务开始运行。
+        tasks_.reserve(tasks.size());
+
+        for (auto& task : tasks) {
+            tasks_.emplace_back(make_join_task(std::move(task)));
+        }
+    }
+
+    RangeWhenAllAwaiter(const RangeWhenAllAwaiter&) = delete;
+    RangeWhenAllAwaiter& operator=(const RangeWhenAllAwaiter&) = delete;
+    RangeWhenAllAwaiter(RangeWhenAllAwaiter&&) = delete;
+    RangeWhenAllAwaiter& operator=(RangeWhenAllAwaiter&&) = delete;
+
+    [[nodiscard]] bool await_ready() const noexcept {
+        return tasks_.empty();
+    }
+
+    [[nodiscard]] bool await_suspend(
+        std::coroutine_handle<> continuation) noexcept {
+        for (auto& task : tasks_) {
+            task.start(counter_);
+        }
+
+        // 此调用后最后一个子任务可能立即恢复并销毁当前 awaiter。
+        return counter_.try_await(continuation);
+    }
+
+    std::vector<WhenAllValue<Result>> await_resume() {
+        for (const auto& task : tasks_) {
+            task.rethrow_if_exception();
+        }
+
+        std::vector<WhenAllValue<Result>> results {};
+        results.reserve(tasks_.size());
+
+        for (auto& task : tasks_) {
+            results.emplace_back(task.take_result());
+        }
+
+        return results;
+    }
+};
+
 }  // namespace mcpplibs::cmp::detail
 
 export namespace mcpplibs::cmp {
@@ -218,6 +270,14 @@ template<typename... Results>
     Task<Results>... tasks) {
     co_return co_await detail::WhenAllAwaiter<Results...> {
         std::move(tasks)...
+    };
+}
+
+template<typename Result>
+[[nodiscard]] Task<std::vector<detail::WhenAllValue<Result>>> when_all(
+    std::vector<Task<Result>> tasks) {
+    co_return co_await detail::RangeWhenAllAwaiter<Result> {
+        std::move(tasks)
     };
 }
 

@@ -16,10 +16,10 @@
 [![ci-windows](https://github.com/mcpplibs/cmp/actions/workflows/ci-windows.yml/badge.svg?branch=main)](https://github.com/mcpplibs/cmp/actions/workflows/ci-windows.yml)
 
 > [!IMPORTANT]
-> CMP provides a lazy, single-consumer `Task<T>` / `Task<void>`, structured variadic `when_all()`,
-> and a caller-thread `RunLoop` with explicit and monotonic timed scheduling. Timed waits support
-> cooperative cancellation with `std::stop_token`; asynchronous I/O and detached execution are
-> not implemented.
+> CMP provides a lazy, single-consumer `Task<T>` / `Task<void>`, structured variadic and vector
+> `when_all()`, and a caller-thread `RunLoop` with explicit and monotonic timed scheduling. Timed
+> waits support cooperative cancellation with `std::stop_token`; asynchronous I/O and detached
+> execution are not implemented.
 
 CMP is being built as a modern coroutine runtime and library on standard stackless C++
 coroutines. Its explicit `co_await` model now covers structured concurrent joins, scheduling,
@@ -112,10 +112,11 @@ Task<int> delayed_value(
 }
 
 Task<void> print_concurrent_results(RunLoop::Scheduler scheduler) {
-    auto [first, second] = co_await when_all(
-        delayed_value(scheduler, 10ms, 20),
-        delayed_value(scheduler, 1ms, 22));
-    std::println("Concurrent result: {}", first + second);
+    std::vector<Task<int>> tasks {};
+    tasks.emplace_back(delayed_value(scheduler, 10ms, 20));
+    tasks.emplace_back(delayed_value(scheduler, 1ms, 22));
+    auto values = co_await when_all(std::move(tasks));
+    std::println("Concurrent result: {}", values[0] + values[1]);
     co_return;
 }
 
@@ -149,7 +150,9 @@ deliberately unsupported.
 for earlier suspended inputs, then keeps all child frames alive until every input completes.
 Results are returned in parameter order as a `std::tuple`; `Task<void>` contributes
 `std::monostate`. If children fail, all children still finish before the first exception in
-parameter order is rethrown. Named Tasks must be moved into `when_all()`.
+parameter order is rethrown. Named Tasks must be moved into `when_all()`. A runtime-sized,
+homogeneous collection can be passed as `std::vector<Task<T>>`; it returns a result vector in the
+same index order, and a named input vector must also be moved.
 
 A translation unit that defines a coroutine must import `std` so the compiler can see the standard
 coroutine protocol types. CMP imports `std` privately and does not re-export the whole standard
@@ -218,8 +221,8 @@ Runtime work is split into independently reviewable phases:
 1. package identity and importable-module bootstrap — implemented;
 2. coroutine task and lifetime semantics — initial `Task` implemented;
 3. a root runner and minimal single-thread scheduler — initially implemented;
-4. monotonic Timer v1, cancellable timed waits, and variadic structured joins — implemented;
-   dynamic task scopes, cancellation propagation, and more wake-up paths remain;
+4. monotonic Timer v1, cancellable timed waits, and variadic/vector structured joins — implemented;
+   mutable task scopes, cancellation propagation, and more wake-up paths remain;
 5. multi-worker scheduling and work stealing;
 6. asynchronous I/O integration and a blocking pool.
 

@@ -28,10 +28,11 @@ Task<int> delayed_value(
 }
 
 Task<void> print_concurrent_results(RunLoop::Scheduler scheduler) {
-    auto [first, second] = co_await when_all(
-        delayed_value(scheduler, 10ms, 20),
-        delayed_value(scheduler, 1ms, 22));
-    std::println("Concurrent result: {}", first + second);
+    std::vector<Task<int>> tasks {};
+    tasks.emplace_back(delayed_value(scheduler, 10ms, 20));
+    tasks.emplace_back(delayed_value(scheduler, 1ms, 22));
+    auto values = co_await when_all(std::move(tasks));
+    std::println("Concurrent result: {}", values[0] + values[1]);
     co_return;
 }
 

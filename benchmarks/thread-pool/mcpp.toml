@@ -1,0 +1,9 @@
+[package]
+name        = "cmp-thread-pool-benchmark"
+version     = "0.1.0"
+standard    = "c++23"
+description = "Standalone CMP thread-pool scheduling benchmark"
+license     = "Apache-2.0"
+
+[dependencies.mcpplibs]
+cmp = { path = "../.." }

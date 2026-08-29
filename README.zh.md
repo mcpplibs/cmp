@@ -10,6 +10,7 @@
 
 [mcpp](https://github.com/mcpp-community/mcpp) · [架构](docs/architecture.zh.md) ·
 [v1 可开发性压测](docs/benchmarks/2026-08-29-cmp-v1-readiness.md) ·
+[线程池压测](docs/benchmarks/2026-08-29-cmp-thread-pool.md) ·
 [Issues](https://github.com/mcpplibs/cmp/issues)
 
 [![ci-linux](https://github.com/mcpplibs/cmp/actions/workflows/ci-linux.yml/badge.svg?branch=main)](https://github.com/mcpplibs/cmp/actions/workflows/ci-linux.yml)
@@ -19,13 +20,13 @@
 > [!IMPORTANT]
 > CMP 已提供懒启动、单消费者的 `Task<T>` / `Task<void>`、支持变参和 vector 的结构化
 > `when_all()`、eager 结构化 `TaskGroup`、一次性与可复用事件、RAII `AsyncMutex`，以及在调用
-> 线程运行、支持显式调度和单调时钟定时调度的 `RunLoop`。就绪调度、定时等待、可复用事件等待
-> 和 TaskGroup 子任务可显式使用基于 `std::stop_token` 的协作式取消；异步 I/O 和 detached
-> 执行尚未实现。
+> 线程运行、支持显式调度和单调时钟定时调度的 `RunLoop`，以及固定大小的 CPU `ThreadPool`。
+> 两种执行器的就绪调度、定时等待、可复用事件等待和 TaskGroup 子任务可显式使用基于
+> `std::stop_token` 的协作式取消；异步 I/O 和 detached 执行尚未实现。
 
 CMP 计划基于标准无栈 C++ 协程构建现代协程运行时和库。显式 `co_await` 模型现已覆盖固定与
-增量结构化并发、一次性事件通知、调度、单调时钟定时器和可取消定时等待，并将通过经过验证
-的小步骤继续探索异步 I/O 以及阻塞工作的安全隔离。
+增量结构化并发、一次性事件通知、调用线程与多 worker 调度、单调时钟定时器和可取消等待，
+并将通过经过验证的小步骤继续探索异步 I/O 以及阻塞工作的安全隔离。
 
 ## 为什么叫 CMP？
 
@@ -48,7 +49,7 @@ C++ 标准协程是语言机制，不是完整运行时。因此 CMP 不会宣�
 - task 自动等同于 Go goroutine；
 - 任意阻塞调用会自动变成非阻塞调用；
 - 可以直接在信号处理器中安全切换协程；
-- M:N 调度、work stealing、通用取消传播或异步 I/O 已经实现。
+- task 会隐式迁移、work stealing 已启用，或任意异步 I/O 已经实现。
 
 这些能力必须分别设计和验证。预期方向是显式异步 I/O awaiter、专用 blocking pool
 以及协作式安全点。
@@ -72,7 +73,7 @@ cd examples/basic
 mcpp run
 ```
 
-示例会打印 `Coroutine result: 42`、`Concurrent result: 42`、`Task group result: 42` 和
+示例会打印 `Coroutine result: 42`、`Concurrent result: 42`、`Worker pool result: 42`、`Task group result: 42` 和
 `Recursive group result: 3`，然后通过 `Event signalled` 与 `Reusable event cycles: 2`
 演示一次性及可复用通知，再打印 `Mutex result: 42` 和 `Coroutine cancelled`；所有输出都在
 `Task<void>` 协程内部。
@@ -89,6 +90,7 @@ using mcpplibs::cmp::AsyncMutex;
 using mcpplibs::cmp::OperationCancelled;
 using mcpplibs::cmp::OneShotEvent;
 using mcpplibs::cmp::TaskGroup;
+using mcpplibs::cmp::ThreadPool;
 using mcpplibs::cmp::when_all;
 
 using namespace std::chrono_literals;
@@ -118,6 +120,23 @@ Task<void> print_concurrent_results(RunLoop::Scheduler scheduler) {
     tasks.emplace_back(delayed_value(scheduler, 1ms, 22));
     auto values = co_await when_all(std::move(tasks));
     std::println("Concurrent result: {}", values[0] + values[1]);
+    co_return;
+}
+
+Task<int> calculate_on_workers(
+    ThreadPool::Scheduler workers,
+    RunLoop::Scheduler caller) {
+    co_await workers.schedule();
+    const int result = 21 * 2;
+    co_await caller.schedule();
+    co_return result;
+}
+
+Task<void> print_worker_result(
+    ThreadPool::Scheduler workers,
+    RunLoop::Scheduler caller) {
+    const auto result = co_await calculate_on_workers(workers, caller);
+    std::println("Worker pool result: {}", result);
     co_return;
 }
 
@@ -189,9 +208,13 @@ Task<void> print_cancellation(RunLoop::Scheduler scheduler, std::stop_token toke
 }
 
 int main() {
+    ThreadPool workers { 2 };
     RunLoop loop {};
     loop.run(print_answer(loop.get_scheduler()));
     loop.run(print_concurrent_results(loop.get_scheduler()));
+    loop.run(print_worker_result(
+        workers.get_scheduler(),
+        loop.get_scheduler()));
     loop.run(print_task_group(loop.get_scheduler()));
     loop.run(print_event(loop.get_scheduler()));
     loop.run(print_mutex(loop.get_scheduler()));
@@ -247,6 +270,12 @@ set 不做任何事。事件不可移动且必须比等待者活得更久；v1 �
 消费获胜，等待会抛出 `OperationCancelled`；较晚的停止请求不能替换已经获胜的完成。停止回调
 只唤醒 RunLoop，用户协程仍由执行 `run()` 的线程恢复。当前取消通过 O(n) 扫描定位队列项。
 
+`ThreadPool` 启动固定数量的 CPU worker。其可复制 Scheduler 始终挂起，并可在任意 worker 上
+恢复 continuation；需要回到调用线程时显式等待 `RunLoop::Scheduler`。
+`schedule(stop_token)` 与 RunLoop 就绪调度采用相同的完成/取消胜者规则。v1 使用一个
+work-conserving 共享 FIFO 和休眠 worker；析构关闭接纳、排空全部已接纳项并 join worker。
+ThreadPool 不拥有上层 Task，阻塞调用仍会阻塞当前 worker。
+
 RunLoop 不是后台线程，也不会把阻塞代码自动变成异步代码。如果 Task 挂起后没有安排未来的
 恢复动作，`run()` 可能一直等待。CMP 不提供隐式线程亲和：外部 awaiter 在其他线程恢复协程
 后，需要显式等待目标 Scheduler 才会返回对应 RunLoop。
@@ -261,6 +290,7 @@ RunLoop 不是后台线程，也不会把阻塞代码自动变成异步代码。
 ├── src/task.cppm             # Task 模块分区
 ├── src/cancellation.cppm     # 共享的协作式取消异常
 ├── src/run_loop.cppm         # RunLoop 与 Scheduler 分区
+├── src/thread_pool.cppm      # 固定大小的 CPU worker 调度器
 ├── src/when_all.cppm         # 结构化并发 Task 汇合
 ├── src/task_group.cppm       # eager 可变结构化 Task 作用域
 ├── src/one_shot_event.cppm   # 无分配一次性通知
@@ -268,6 +298,7 @@ RunLoop 不是后台线程，也不会把阻塞代码自动变成异步代码。
 ├── src/async_mutex.cppm      # FIFO 协程感知 RAII 互斥锁
 ├── tests/cmp_test.cpp        # Task 契约和生命周期测试
 ├── tests/run_loop_test.cpp   # 调度、边界和线程测试
+├── tests/thread_pool_test.cpp # worker、取消和关闭测试
 ├── tests/when_all_test.cpp   # 汇合所有权、结果和竞态测试
 ├── tests/task_group_test.cpp # 可变作用域生命周期和竞态测试
 ├── tests/one_shot_event_test.cpp # 事件发布和竞态测试
@@ -275,6 +306,7 @@ RunLoop 不是后台线程，也不会把阻塞代码自动变成异步代码。
 ├── tests/async_mutex_test.cpp # mutex 所有权和交接测试
 ├── examples/basic/           # 独立的路径依赖 consumer
 ├── benchmarks/v1-readiness/  # 本地计算、文件和回环网络基线
+├── benchmarks/thread-pool/   # 本地多 worker 调度基线
 ├── docs/architecture.zh.md   # 当前结构、边界和演进方向
 └── .github/workflows/        # Linux、macOS 和 Windows CI
 ```
@@ -298,8 +330,9 @@ CI 在 Linux、macOS 和 Windows 上执行等价的构建、测试和独立示�
 
 CMP 当前不跟踪 `mcpp.lock`，`.gitignore` 明确执行这一仓库约定。运行时依赖放在
 `[dependencies]`，gtest 明确声明在 `[dev-dependencies.compat]` 中。
-当前本地套件包含 7 个测试二进制、90 项测试。仅用于 POSIX 的 Release 压测 consumer 及其
+当前本地套件包含 8 个测试二进制、105 项测试。仅用于 POSIX 的 Release 压测 consumer 及其
 成功/失败数据记录在 [v1 可开发性压测](docs/benchmarks/2026-08-29-cmp-v1-readiness.md)。
+多 worker 正确性和性能数据记录在[线程池压测](docs/benchmarks/2026-08-29-cmp-thread-pool.md)。
 
 ## 路线图
 
@@ -310,7 +343,7 @@ CMP 当前不跟踪 `mcpp.lock`，`.gitignore` 明确执行这一仓库约定。
 3. 根任务驱动器和最小单线程调度器——已完成初始实现；
 4. 单调时钟 Timer v1、可取消就绪/定时等待、变参/vector 汇合、静止点 TaskGroup、
    OneShotEvent、AsyncManualResetEvent 和 AsyncMutex——已实现并完成压力验证；
-5. 多 worker 调度与 work stealing；
+5. 固定大小的多 worker 调度——已实现并完成压测；work stealing 仍需 profiling 证据；
 6. 异步 I/O 集成和 blocking pool。
 
 剩余顺序只是方向，不代表列出的能力已经实现。

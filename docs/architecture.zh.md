@@ -5,21 +5,23 @@
 ## 当前状态
 
 CMP 是一个具备小型协程执行核心的 C++23 模块项目。根模块导出懒启动、单消费者的
-`mcpplibs::cmp::Task<T>`、结构化变参/vector `when_all()`、eager `TaskGroup`、`RunLoop` 及其
-可复制的 `Scheduler` 句柄、无分配 `OneShotEvent`、可复用 `AsyncManualResetEvent` 和 RAII
-`AsyncMutex`。汇合原语会持有每个子任务直到结束，事件负责发布外部信号。
+`mcpplibs::cmp::Task<T>`、结构化变参/vector `when_all()`、eager `TaskGroup`、调用线程
+`RunLoop`、固定大小的 CPU `ThreadPool` 及其可复制 Scheduler 句柄、无分配 `OneShotEvent`、
+可复用 `AsyncManualResetEvent` 和 RAII `AsyncMutex`。汇合原语会持有每个子任务直到结束，
+事件负责发布外部信号。
 `RunLoop::run()` 是公共根任务执行边界，`Scheduler::schedule()` 用于显式地把挂起协程送回
 对应运行循环。`schedule()`、`schedule_after()` 和 `schedule_at()` 都有接受
 `std::stop_token` 的协作式取消重载；定时调度使用相对和绝对的 `steady_clock` 期限，且不创建
-定时线程。
+定时线程。`ThreadPool::Scheduler::schedule()` 会把 continuation 显式转移到任意固定 worker，
+并采用相同的取消获胜规则。
 
 仓库现有内容包括：
 
 - 一份 mcpp 包清单；
-- 根模块 `mcpplibs.cmp` 及 Task、cancellation、RunLoop、join、event、mutex 模块分区；
+- 根模块 `mcpplibs.cmp` 及 Task、cancellation、执行器、join、event、mutex 模块分区；
 - 覆盖契约、生命周期、异常、调度和线程行为的 gtest 测试；
 - 一个通过路径依赖使用根包的独立示例；
-- 一个验证计算、文件与回环网络集成的本地 POSIX 压测 consumer；
+- v1 可开发性压测和跨平台 ThreadPool 压测 consumer；
 - Linux、macOS 和 Windows 三套 CI 工作流。
 
 ## 包和模块标识
@@ -66,6 +68,7 @@ mcpp 包由 `mcpplibs` 和 `cmp` 共同标识。使用方在 `[dependencies.mcpp
 │   ├── task.cppm
 │   ├── cancellation.cppm
 │   ├── run_loop.cppm
+│   ├── thread_pool.cppm
 │   ├── when_all.cppm
 │   ├── task_group.cppm
 │   ├── one_shot_event.cppm
@@ -74,6 +77,7 @@ mcpp 包由 `mcpplibs` 和 `cmp` 共同标识。使用方在 `[dependencies.mcpp
 ├── tests/
 │   ├── cmp_test.cpp
 │   ├── run_loop_test.cpp
+│   ├── thread_pool_test.cpp
 │   ├── when_all_test.cpp
 │   ├── task_group_test.cpp
 │   ├── one_shot_event_test.cpp
@@ -82,13 +86,16 @@ mcpp 包由 `mcpplibs` 和 `cmp` 共同标识。使用方在 `[dependencies.mcpp
 ├── benchmarks/v1-readiness/
 │   ├── mcpp.toml
 │   └── src/main.cpp
+├── benchmarks/thread-pool/
+│   ├── mcpp.toml
+│   └── src/main.cpp
 └── mcpp.toml
 ```
 
 ## 构建与测试
 
 `.xlings.json` 固定项目使用的 mcpp 版本。`mcpp build` 构建自动推断的库目标。
-`mcpp test` 发现七个测试文件，并为每个文件链接 gtest 入口。90 项测试同时验证 Task 所有权和
+`mcpp test` 发现八个测试文件，并为每个文件链接 gtest 入口。105 项测试同时验证 Task 所有权和
 对称转移、结构化汇合，以及根任务执行、普通与定时调度、异常传播、跨线程期限唤醒、无效
 Scheduler、取消竞态、RunLoop 复用和不会增长调用栈的重复完成。
 
@@ -128,6 +135,7 @@ using mcpplibs::cmp::AsyncMutex;
 using mcpplibs::cmp::OperationCancelled;
 using mcpplibs::cmp::OneShotEvent;
 using mcpplibs::cmp::TaskGroup;
+using mcpplibs::cmp::ThreadPool;
 using mcpplibs::cmp::when_all;
 
 using namespace std::chrono_literals;
@@ -157,6 +165,16 @@ Task<void> print_concurrent_results(RunLoop::Scheduler scheduler) {
     tasks.emplace_back(delayed_value(scheduler, 1ms, 22));
     auto values = co_await when_all(std::move(tasks));
     std::println("Concurrent result: {}", values[0] + values[1]);
+    co_return;
+}
+
+Task<void> print_worker_result(
+    ThreadPool::Scheduler workers,
+    RunLoop::Scheduler caller) {
+    co_await workers.schedule();
+    const int result = 21 * 2;
+    co_await caller.schedule();
+    std::println("Worker pool result: {}", result);
     co_return;
 }
 
@@ -228,9 +246,13 @@ Task<void> print_cancellation(RunLoop::Scheduler scheduler, std::stop_token toke
 }
 
 int main() {
+    ThreadPool workers { 2 };
     RunLoop loop {};
     loop.run(print_answer(loop.get_scheduler()));
     loop.run(print_concurrent_results(loop.get_scheduler()));
+    loop.run(print_worker_result(
+        workers.get_scheduler(),
+        loop.get_scheduler()));
     loop.run(print_task_group(loop.get_scheduler()));
     loop.run(print_event(loop.get_scheduler()));
     loop.run(print_mutex(loop.get_scheduler()));
@@ -242,7 +264,8 @@ int main() {
 ```
 
 该示例在根测试目标之外，单独检查路径依赖解析、模块使用、外部协程编译和公共根任务驱动器。
-RunLoop 依次输出 `Coroutine result: 42`、`Concurrent result: 42` 和 `Task group result: 42`；
+RunLoop 依次输出 `Coroutine result: 42` 和 `Concurrent result: 42`；worker pool 协程离开调用
+线程完成计算，显式回到 RunLoop 后输出 `Worker pool result: 42`，随后输出 `Task group result: 42`；
 递归增长的 group 输出 `Recursive group result: 3`。其他协程演示一次性及两轮可复用事件并
 输出 `Event signalled`、`Reusable event cycles: 2`，两个受保护 Task 输出
 `Mutex result: 42`。最后一个结构化 group 使用 `cancel_and_join()`，从可取消就绪调度捕获
@@ -344,6 +367,20 @@ RunLoop 不拥有工作线程，也不提供自动线程亲和。外部 awaiter 
 显式等待原 Scheduler 才会把 continuation 送回对应 RunLoop。如果 Task 挂起后没有安排
 其他线程或事件源恢复它，`run()` 可能无限等待。阻塞函数仍会阻塞协程当前所在的线程。
 
+`ThreadPool` 及其 Scheduler 遵循以下契约：
+
+- 构造时启动固定 worker 数；默认值在硬件并发数未知时归一为一，显式传零抛出
+  `std::invalid_argument`；
+- pool 不可移动；弱引用、可复制的 Scheduler 标识原 pool，但不延长其生命周期；
+- `schedule()` 始终挂起并进入一个共享 FIFO，任意 worker 都可恢复，空闲 worker 会休眠；
+- `schedule(stop_token)` 即使预先取消也会排队；worker claim 与取消原子地选择一个终态，
+  用户代码只由 worker 恢复；
+- continuation 在队列锁外恢复，每个已接纳条目都会唤醒一个 worker；
+- 析构关闭接纳、排空已接纳条目并 join 所有 worker；之后调度抛出 `std::logic_error`；
+- 在 pool 自己的 worker 中析构是无效生命周期安排，会立即终止；
+- pool 只拥有线程、不拥有 Task，也不提供 timer、阻塞 I/O 适配、detached、resize、优先级或
+  affinity API。
+
 目前没有公共自由函数 `sync_wait`、detached 执行、独立 Timer 句柄、异步 I/O 后端、自定义
 协程帧 allocator 或阻塞任务线程池。取消仍是显式的：Scheduler 等待和
 `AsyncManualResetEvent` 接受 token，TaskGroup 可持有共享 stop 通道，但模块不提供隐式传播，
@@ -361,14 +398,14 @@ CMP 名称中的 `C` 与 Go 运行时中的 `G` 相呼应，但这只说明命�
 
 1. TaskGroup 结果句柄及更多支持取消的原语；
 2. channel 和更多结构化唤醒路径；
-3. 多工作线程调度和工作窃取；
+3. 代表性负载证明有必要时再加入 profiling 驱动的工作窃取；
 4. 异步 I/O 集成；
 5. 处理不可避免的阻塞工作的专用线程池；
 6. 结果适配器和可选的协程帧分配策略。
 
-Task、cancellation、RunLoop、`when_all`、TaskGroup、OneShotEvent、AsyncManualResetEvent 与
-AsyncMutex 已经形成真实的公共边界，因此分别位于模块分区中。只有其他已实现 API 确实需要
-新边界时，才继续增加模块分区或实现单元。
+Task、cancellation、RunLoop、ThreadPool、`when_all`、TaskGroup、OneShotEvent、
+AsyncManualResetEvent 与 AsyncMutex 已经形成真实的公共边界，因此分别位于模块分区中。
+只有其他已实现 API 确实需要新边界时，才继续增加模块分区或实现单元。
 
 ## 验证
 
@@ -383,13 +420,14 @@ cd examples/basic
 mcpp run
 ```
 
-预期结果是库构建成功、七个二进制中的 90 项测试全部通过，并且示例依次输出
-`Coroutine result: 42`、`Concurrent result: 42`、`Task group result: 42`、
+预期结果是库构建成功、八个二进制中的 105 项测试全部通过，并且示例依次输出
+`Coroutine result: 42`、`Concurrent result: 42`、`Worker pool result: 42`、`Task group result: 42`、
 `Recursive group result: 3`、`Event signalled`、`Reusable event cycles: 2`、
 `Mutex result: 42` 和 `Coroutine cancelled` 后以状态 0 退出。测试保留原有高容量栈安全检查，
 并增加两万次 TaskGroup 递归接纳、十万次预取消就绪调度、五万个 manual event 等待者、两万次
 嵌套可复用事件信号及 set/cancel 竞态；第四阶段重点竞态套件已连续执行多轮 Release 测试。
 计算、临时文件和回环网络的成功/失败计数及吞吐记录在
-[v1 可开发性压测](benchmarks/2026-08-29-cmp-v1-readiness.md)。当前 Windows LLVM 工具链不会
+[v1 可开发性压测](benchmarks/2026-08-29-cmp-v1-readiness.md)。ThreadPool 的计数、并发和五轮
+Release 数据记录在[线程池压测](benchmarks/2026-08-29-cmp-thread-pool.md)。当前 Windows LLVM 工具链不会
 生成 GNU depfile；如果模块接口包含的文件发生变化，增量构建可能复用旧的 BMI 或目标文件。
 完整复验时使用 `--cache=off`。

@@ -10,6 +10,7 @@
 
 [mcpp](https://github.com/mcpp-community/mcpp) · [架構](docs/architecture.zh.hant.md) ·
 [v1 可開發性壓測](docs/benchmarks/2026-08-29-cmp-v1-readiness.md) ·
+[執行緒池壓測](docs/benchmarks/2026-08-29-cmp-thread-pool.md) ·
 [Issues](https://github.com/mcpplibs/cmp/issues)
 
 [![ci-linux](https://github.com/mcpplibs/cmp/actions/workflows/ci-linux.yml/badge.svg?branch=main)](https://github.com/mcpplibs/cmp/actions/workflows/ci-linux.yml)
@@ -19,13 +20,13 @@
 > [!IMPORTANT]
 > CMP 已提供延遲啟動、單一消費者的 `Task<T>` / `Task<void>`、支援變參和 vector 的結構化
 > `when_all()`、eager 結構化 `TaskGroup`、一次性與可複用事件、RAII `AsyncMutex`，以及在呼叫
-> 執行緒運行、支援明確排程和單調時鐘定時排程的 `RunLoop`。就緒排程、定時等待、可複用事件
-> 等待和 TaskGroup 子任務可明確使用基於 `std::stop_token` 的協作式取消；非同步 I/O 和
-> detached 執行尚未實作。
+> 執行緒運行、支援明確排程和單調時鐘定時排程的 `RunLoop`，以及固定大小的 CPU
+> `ThreadPool`。兩種執行器的就緒排程、定時等待、可複用事件等待和 TaskGroup 子任務可明確
+> 使用基於 `std::stop_token` 的協作式取消；非同步 I/O 和 detached 執行尚未實作。
 
 CMP 計畫以標準無堆疊 C++ 協程建構現代協程執行期與函式庫。明確的 `co_await` 模型現已
-涵蓋固定與增量結構化並行、一次性事件通知、排程、單調時鐘計時器和可取消定時等待，並將
-透過經過驗證的小步驟繼續探索非同步 I/O，以及阻塞工作的安全隔離。
+涵蓋固定與增量結構化並行、一次性事件通知、呼叫執行緒與多 worker 排程、單調時鐘計時器和
+可取消等待，並將透過經過驗證的小步驟繼續探索非同步 I/O，以及阻塞工作的安全隔離。
 
 ## 為什麼叫 CMP？
 
@@ -48,7 +49,7 @@ C++ 標準協程是語言機制，不是完整執行期。因此 CMP 不會宣�
 - task 自動等同於 Go goroutine；
 - 任意阻塞呼叫會自動成為非阻塞呼叫；
 - 可以直接在訊號處理器中安全切換協程；
-- M:N 排程、work stealing、通用取消傳播或非同步 I/O 已經實作。
+- task 會隱式遷移、work stealing 已啟用，或任意非同步 I/O 已經實作。
 
 這些能力必須分別設計和驗證。預期方向是明確的非同步 I/O awaiter、專用 blocking pool
 以及協作式安全點。
@@ -72,7 +73,7 @@ cd examples/basic
 mcpp run
 ```
 
-範例會印出 `Coroutine result: 42`、`Concurrent result: 42`、`Task group result: 42` 和
+範例會印出 `Coroutine result: 42`、`Concurrent result: 42`、`Worker pool result: 42`、`Task group result: 42` 和
 `Recursive group result: 3`，接著透過 `Event signalled` 與 `Reusable event cycles: 2`
 展示一次性及可複用通知，再印出 `Mutex result: 42` 和 `Coroutine cancelled`；所有輸出都在
 `Task<void>` 協程內部。
@@ -89,6 +90,7 @@ using mcpplibs::cmp::AsyncMutex;
 using mcpplibs::cmp::OperationCancelled;
 using mcpplibs::cmp::OneShotEvent;
 using mcpplibs::cmp::TaskGroup;
+using mcpplibs::cmp::ThreadPool;
 using mcpplibs::cmp::when_all;
 
 using namespace std::chrono_literals;
@@ -118,6 +120,23 @@ Task<void> print_concurrent_results(RunLoop::Scheduler scheduler) {
     tasks.emplace_back(delayed_value(scheduler, 1ms, 22));
     auto values = co_await when_all(std::move(tasks));
     std::println("Concurrent result: {}", values[0] + values[1]);
+    co_return;
+}
+
+Task<int> calculate_on_workers(
+    ThreadPool::Scheduler workers,
+    RunLoop::Scheduler caller) {
+    co_await workers.schedule();
+    const int result = 21 * 2;
+    co_await caller.schedule();
+    co_return result;
+}
+
+Task<void> print_worker_result(
+    ThreadPool::Scheduler workers,
+    RunLoop::Scheduler caller) {
+    const auto result = co_await calculate_on_workers(workers, caller);
+    std::println("Worker pool result: {}", result);
     co_return;
 }
 
@@ -189,9 +208,13 @@ Task<void> print_cancellation(RunLoop::Scheduler scheduler, std::stop_token toke
 }
 
 int main() {
+    ThreadPool workers { 2 };
     RunLoop loop {};
     loop.run(print_answer(loop.get_scheduler()));
     loop.run(print_concurrent_results(loop.get_scheduler()));
+    loop.run(print_worker_result(
+        workers.get_scheduler(),
+        loop.get_scheduler()));
     loop.run(print_task_group(loop.get_scheduler()));
     loop.run(print_event(loop.get_scheduler()));
     loop.run(print_mutex(loop.get_scheduler()));
@@ -247,6 +270,12 @@ set 不做任何事。事件不可移動且必須比等待者活得更久；v1 �
 消費獲勝，等待會拋出 `OperationCancelled`；較晚的停止要求不能取代已經獲勝的完成。停止回呼
 只喚醒 RunLoop，使用者協程仍由執行 `run()` 的執行緒恢復。目前取消透過 O(n) 掃描定位佇列項。
 
+`ThreadPool` 啟動固定數量的 CPU worker。其可複製 Scheduler 始終暫停，並可在任意 worker 上
+恢復 continuation；需要返回呼叫執行緒時明確等待 `RunLoop::Scheduler`。
+`schedule(stop_token)` 與 RunLoop 就緒排程採用相同的完成/取消勝者規則。v1 使用一個
+work-conserving 共用 FIFO 和休眠 worker；解構關閉接納、排空全部已接納項並 join worker。
+ThreadPool 不擁有上層 Task，阻塞呼叫仍會阻塞目前 worker。
+
 RunLoop 不是背景執行緒，也不會把阻塞程式碼自動變成非同步程式碼。如果 Task 暫停後沒有
 安排未來的恢復動作，`run()` 可能一直等待。CMP 不提供隱式執行緒親和：外部 awaiter 在其他
 執行緒恢復協程後，需要明確等待目標 Scheduler 才會返回對應 RunLoop。
@@ -261,6 +290,7 @@ RunLoop 不是背景執行緒，也不會把阻塞程式碼自動變成非同步
 ├── src/task.cppm                  # Task 模組分割區
 ├── src/cancellation.cppm          # 共用的協作式取消例外
 ├── src/run_loop.cppm              # RunLoop 與 Scheduler 分割區
+├── src/thread_pool.cppm            # 固定大小的 CPU worker 排程器
 ├── src/when_all.cppm              # 結構化並行 Task 匯合
 ├── src/task_group.cppm             # eager 可變結構化 Task 作用域
 ├── src/one_shot_event.cppm         # 無分配一次性通知
@@ -268,6 +298,7 @@ RunLoop 不是背景執行緒，也不會把阻塞程式碼自動變成非同步
 ├── src/async_mutex.cppm            # FIFO 協程感知 RAII 互斥鎖
 ├── tests/cmp_test.cpp             # Task 契約和生命週期測試
 ├── tests/run_loop_test.cpp        # 排程、邊界和執行緒測試
+├── tests/thread_pool_test.cpp      # worker、取消和關閉測試
 ├── tests/when_all_test.cpp        # 匯合所有權、結果和競態測試
 ├── tests/task_group_test.cpp       # 可變作用域生命週期和競態測試
 ├── tests/one_shot_event_test.cpp   # 事件發布和競態測試
@@ -275,6 +306,7 @@ RunLoop 不是背景執行緒，也不會把阻塞程式碼自動變成非同步
 ├── tests/async_mutex_test.cpp       # mutex 所有權和交接測試
 ├── examples/basic/                # 獨立的路徑相依 consumer
 ├── benchmarks/v1-readiness/       # 本機計算、檔案和回環網路基線
+├── benchmarks/thread-pool/         # 本機多 worker 排程基線
 ├── docs/architecture.zh.hant.md   # 目前結構、邊界與演進方向
 └── .github/workflows/             # Linux、macOS 和 Windows CI
 ```
@@ -298,8 +330,9 @@ CI 在 Linux、macOS 和 Windows 上執行等價的建構、測試與獨立範�
 
 CMP 目前不追蹤 `mcpp.lock`，`.gitignore` 明確執行這項儲存庫約定。執行期相依放在
 `[dependencies]`，gtest 明確宣告在 `[dev-dependencies.compat]` 中。
-目前本機套件包含 7 個測試二進位檔、90 項測試。僅用於 POSIX 的 Release 壓測 consumer 及其
+目前本機套件包含 8 個測試二進位檔、105 項測試。僅用於 POSIX 的 Release 壓測 consumer 及其
 成功/失敗資料記錄在 [v1 可開發性壓測](docs/benchmarks/2026-08-29-cmp-v1-readiness.md)。
+多 worker 正確性和效能資料記錄在[執行緒池壓測](docs/benchmarks/2026-08-29-cmp-thread-pool.md)。
 
 ## 路線圖
 
@@ -310,7 +343,7 @@ CMP 目前不追蹤 `mcpp.lock`，`.gitignore` 明確執行這項儲存庫約定
 3. 根任務驅動器和最小單執行緒排程器——已完成初始實作；
 4. 單調時鐘 Timer v1、可取消就緒/定時等待、變參/vector 匯合、靜止點 TaskGroup、
    OneShotEvent、AsyncManualResetEvent 和 AsyncMutex——已實作並完成壓力驗證；
-5. 多 worker 排程與 work stealing；
+5. 固定大小的多 worker 排程——已實作並完成壓測；work stealing 仍需 profiling 證據；
 6. 非同步 I/O 整合和 blocking pool。
 
 剩餘順序只是方向，不代表列出的能力已經實作。

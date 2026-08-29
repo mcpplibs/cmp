@@ -8,6 +8,7 @@ using mcpplibs::cmp::AsyncMutex;
 using mcpplibs::cmp::OperationCancelled;
 using mcpplibs::cmp::OneShotEvent;
 using mcpplibs::cmp::TaskGroup;
+using mcpplibs::cmp::ThreadPool;
 using mcpplibs::cmp::when_all;
 
 using namespace std::chrono_literals;
@@ -38,6 +39,27 @@ Task<void> print_concurrent_results(RunLoop::Scheduler scheduler) {
     auto values = co_await when_all(std::move(tasks));
     std::println("Concurrent result: {}", values[0] + values[1]);
     co_return;
+}
+
+Task<int> calculate_on_workers(
+    ThreadPool::Scheduler workers,
+    RunLoop::Scheduler caller) {
+    co_await workers.schedule();
+
+    int result { 0 };
+    for (int value { 1 }; value <= 6; ++value) {
+        result += value * 2;
+    }
+
+    co_await caller.schedule();
+    co_return result;
+}
+
+Task<void> print_worker_result(
+    ThreadPool::Scheduler workers,
+    RunLoop::Scheduler caller) {
+    const auto result = co_await calculate_on_workers(workers, caller);
+    std::println("Worker pool result: {}", result);
 }
 
 Task<void> add_delayed(
@@ -178,9 +200,13 @@ Task<void> print_cancellation(RunLoop::Scheduler scheduler) {
 }
 
 int main() {
+    ThreadPool workers { 2 };
     RunLoop loop {};
     loop.run(print_answer(loop.get_scheduler()));
     loop.run(print_concurrent_results(loop.get_scheduler()));
+    loop.run(print_worker_result(
+        workers.get_scheduler(),
+        loop.get_scheduler()));
     loop.run(print_task_group(loop.get_scheduler()));
     loop.run(print_recursive_group(loop.get_scheduler()));
     loop.run(print_event(loop.get_scheduler()));

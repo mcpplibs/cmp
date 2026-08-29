@@ -2,129 +2,102 @@
 
 ## 项目概览
 
-CMP 是使用 mcpp 构建的 C++23 Modules 协程运行时库，公开模块为 `mcpplibs.cmp`。当前 v1
-核心包括：
+CMP 是使用 mcpp 构建的 C++23 Modules 协程运行时库，公开模块为 `mcpplibs.cmp`。当前已实现
+懒启动唯一所有权 `Task<T>`、变参/vector `when_all()`、静止点 `TaskGroup`、一次性与可复用
+事件、RAII `AsyncMutex`、带定时和取消的调用线程 `RunLoop`，以及固定大小的 CPU
+`ThreadPool`。
 
-- 懒启动、唯一所有权的 `Task<T>`；
-- 变参和 `std::vector` 结构化 `when_all()`；
-- eager、可递归接纳至静止点的 `TaskGroup`；
-- `OneShotEvent`、可取消的 `AsyncManualResetEvent`、RAII `AsyncMutex`；
-- 单消费者 `RunLoop` 及可复制 `Scheduler`；
-- 普通、相对期限、绝对期限调度，以及显式 `std::stop_token` 协作式取消。
-
-`.xlings.json` 固定 mcpp 2026.8.11.2，工具链解析为 LLVM 22.1.8，测试依赖是
+`.xlings.json` 固定 mcpp 2026.8.11.2；当前工具链为 LLVM 22.1.8，测试依赖为
 `compat.gtest` 1.15.2。`examples/basic` 是独立 path-dependency consumer。
 
 ## 当前目标与状态
 
-用户要求补齐第四阶段，增加成功/失败/竞态测试，并对计算、文件 I/O、网络 I/O 做压力验证，
-确认 CMP v1 可用于开发。
+第五阶段 ThreadPool v1 已完成本地实现、测试、示例、压测、三语文档同步及复审修复，当前可
+进入用户审查及远程 CI 交付。本轮未执行任何 Git 或 GitHub 操作；提交、推送、PR 和 CI 均不
+应被视为已经完成。
 
-第四阶段实现、测试、示例和本机压测已经完成，交付前最终一致性检查已通过。Git 交付分支为
-`feature/phase4-v1-readiness`；用户已明确授权提交并推送本阶段全部内容（包括压测），但没有
-授权创建 PR 或合并。
+## 已完成工作
 
-## 本阶段实现
+- 新增不可移动的固定大小 `ThreadPool` 和弱引用、可复制的 `ThreadPool::Scheduler`；根模块已
+  导出该分区。
+- `schedule()` 始终挂起并转移到任意 worker；`schedule(stop_token)` 支持 completion/cancel
+  原子竞态获胜语义。
+- 实现共享 FIFO、休眠 worker、逐项唤醒、锁外恢复、构造失败清理、关闭/入队线性化、排空并
+  join，以及 worker 内自析构终止保护。
+- 新增 15 项确定性 ThreadPool 测试，覆盖 API、FIFO、多 worker 唤醒、结构化组合、取消竞态、
+  高容量/栈安全、关闭与过期 Scheduler。
+- 复审后把默认 worker 数断言收紧为精确契约，并补齐同源与异源过期 Scheduler 的身份比较
+  测试。
+- `examples/basic` 增加协程内 worker 计算、显式回到 RunLoop 并打印
+  `Worker pool result: 42` 的示例。
+- 新增标准库限定的 `benchmarks/thread-pool` consumer 和五轮数据报告；每轮覆盖粗粒度 CPU、
+  连续调度、worker 内 fan-out 和并发重调度。
+- README、架构文档、第五阶段设计/计划及压测报告已同步到实现事实。
+- `mcpp-style-ref` 不再重复维护易过期的分区清单，改以架构文档为当前事实来源；本轮涉及的
+  混合换行文件也已统一。
 
-### TaskGroup 静止点 join
+## 重要决策
 
-- `join()` 等待活动计数归零，不再在开始等待时立即关闭接纳。
-- 已经属于 group 的活动子任务可在 join 等待期间继续 `spawn()`；静止点到达后永久关闭。
-- 外部线程与最后完成瞬间竞态接纳时不保证哪方获胜；join 后接纳抛出 `std::logic_error`。
-- 新增 lazy `cancel_and_join()`：真正被等待时先 `request_stop()`，再执行同一个单次 join。
+- v1 只公开 `ThreadPool`、`get_scheduler()`、`thread_count()` 和两个 `schedule()` 重载；不增加
+  executor 基类、submit/detach、resize、优先级、亲和或公共 shutdown API。
+- 默认 worker 数使用 `hardware_concurrency()` 并把未知的零归一为一；显式传零抛出
+  `std::invalid_argument`。
+- 队列是无界共享 `std::deque`。有界同步接纳可能让递归提交的全部 worker 互相等待，因此
+  backpressure 必须另行设计。
+- 取消项留在 FIFO，由 worker 消费并恢复；取消回调不扫描队列，也不在请求取消的线程恢复用户
+  协程。
+- 析构关闭接纳并排空已经接纳的 continuation；ThreadPool 只拥有执行线程，Task 生命周期仍由
+  `Task`、`when_all()` 和 `TaskGroup` 管理。
+- 本机数据证明粗粒度 CPU 并行有效，也证明微任务会争用共享队列；work stealing 只有在代表性
+  workload 的 profiler 证明共享队列是主要瓶颈后，才进入单独设计。
 
-### 更广泛的显式取消
+## 修改 / 重要文件
 
-- `OperationCancelled` 移到独立 `:cancellation` 分区。
-- 新增 `Scheduler::schedule(std::stop_token)`；预取消也先排队，消费前取消获胜则抛出异常。
-- ready 与 timer 共用取消状态和 stop callback 协议；终态在 RunLoop 状态锁下确定，避免双恢复。
-- 普通调度和定时调度的取消查找仍为 O(n)，只有压测证明瓶颈后才升级数据结构。
+- 核心：`src/thread_pool.cppm`、`src/cmp.cppm`
+- 测试：`tests/thread_pool_test.cpp`
+- 示例：`examples/basic/src/main.cpp`
+- 压测：`benchmarks/thread-pool/`、`docs/benchmarks/2026-08-29-cmp-thread-pool.md`
+- 方案：`docs/superpowers/specs/2026-08-29-cmp-phase5-thread-pool-v1-design.md`、
+  `docs/superpowers/plans/2026-08-29-cmp-phase5-thread-pool-v1.md`
+- 公共文档：三份 README 与三份 `docs/architecture*` 文档
+- Agent 技能：`.agents/skills/mcpp-style-ref/SKILL.md`
 
-### AsyncManualResetEvent
+## 验证情况
 
-- 新增不可移动、无 waiter 分配的 `AsyncManualResetEvent`。
-- 支持初始状态、`is_set()`、`set()`、`reset()`、`wait(stop_token)` 和 `co_await event`。
-- pending 等待者按 FIFO 恢复；双向侵入队列支持 O(1) 取消移除。
-- set/cancel 竞态只有一个终态；预取消确定由取消获胜。
-- setter 或取消请求线程直接恢复等待者；thread-local trampoline 保证嵌套唤醒不增长原生栈。
-- 带 pending 等待者析构会终止，事件必须比等待协程帧活得更久。
+- `mcpp build --profile dev --strict --cache=off`：通过。
+- `mcpp test --profile dev --strict --cache=off`：8 个二进制、105/105 通过。
+- `mcpp build --profile release --strict --cache=off`：通过。
+- `mcpp test --profile release --strict --cache=off`：8 个二进制、105/105 通过。
+- Dev `thread_pool_test` 定向复验：15/15 通过。
+- Release 关键竞态测试子集连续执行 100 轮：100/100 通过。
+- `examples/basic` 的 `mcpp run`：通过，包含 `Worker pool result: 42`，退出码 0。
+- `mcpp-style-ref` 通过 `quick_validate.py` 校验；架构文档链接有效。
+- 项目文本文件换行复查未发现混合 CRLF/LF 文件。
+- ThreadPool Release benchmark：构建通过；五轮记录共 8,410,240 次操作全部成功、非预期失败
+  为 0；最终可执行性复验也全部 PASS。
+- 五轮中位数显示粗粒度 CPU 任务从 1 到 8 worker 约 7.56 倍加速；完整原始数据见压测报告。
+- 以上均为本机 Linux/WSL2 结果；本轮没有运行 GitHub 三平台 CI。
 
-## 测试与压测
+## 已知问题 / 风险
 
-- 全量套件现为 7 个测试二进制、90 项测试。
-- 新增/扩展测试覆盖正常、预取消、晚取消、跨线程、异常、拒绝、静止点、递归接纳、FIFO、
-  publication、set/cancel 竞态、生命周期和原生栈安全。
-- `AsyncManualResetEvent` 10 项套件在 Release 下连续 30 轮通过；每轮包含 1,000 次 set/cancel
-  竞态、50,000 个等待者和 20,000 个嵌套信号。
-- RunLoop 三项关键取消竞态在 Release 下连续 100 轮通过。
-- TaskGroup 四项递归、并发和取消关键用例在 Release 下连续 100 轮通过。
-- 最终文件状态下，Dev / Release `--strict --cache=off` 构建均通过；两个 profile 的全量
-  测试均为 90/90，7 个测试二进制、0 失败。
-
-独立 POSIX Release 压测位于 `benchmarks/v1-readiness`。五轮均为 PASS：
-
-| 场景 | 每轮成功 | 每轮预期失败 | 每轮非预期失败 | 中位耗时 | 中位吞吐 |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| compute | 49,000 | 1,000 | 0 | 28.172 ms | 1,774,824.8 ops/s |
-| file_io | 1,000 | 100 | 0 | 185.222 ms | 5,938.8 ops/s |
-| network_loopback | 20,000 | 100 | 0 | 2,455.883 ms | 8,184.4 ops/s |
-
-原始五轮数据、环境、命令和边界见
-`docs/benchmarks/2026-08-29-cmp-v1-readiness.md`。文件和网络工作由外部 `std::jthread`
-适配，再通过事件和 Scheduler 返回 RunLoop；这验证 v1 互操作及生命周期，不宣称原生异步
-I/O 性能。
-
-## 示例输出
-
-`examples/basic` 已运行成功，输出：
-
-```text
-Coroutine result: 42
-Concurrent result: 42
-Task group result: 42
-Recursive group result: 3
-Event signalled
-Reusable event cycles: 2
-Mutex result: 42
-Coroutine cancelled
-```
-
-## 本阶段重要文件
-
-- `src/cancellation.cppm`
-- `src/run_loop.cppm`
-- `src/task_group.cppm`
-- `src/async_manual_reset_event.cppm`
-- `src/cmp.cppm`
-- `tests/run_loop_test.cpp`
-- `tests/task_group_test.cpp`
-- `tests/async_manual_reset_event_test.cpp`
-- `examples/basic/src/main.cpp`
-- `benchmarks/v1-readiness/mcpp.toml`
-- `benchmarks/v1-readiness/src/main.cpp`
-- `docs/benchmarks/2026-08-29-cmp-v1-readiness.md`
-- `docs/superpowers/specs/2026-08-29-cmp-phase4-v1-completion-design.md`
-- `docs/superpowers/plans/2026-08-29-cmp-phase4-v1-completion.md`
-- 三份 README、三份架构说明和本文件。
-
-## 已知边界与风险
-
-- v1 没有原生异步 I/O、blocking pool、多 worker 调度、work stealing 或 detached 所有权。
-- 阻塞调用仍会阻塞其所在执行线程；当前 I/O consumer 使用外部线程适配。
-- 压测的 socket 实现仅支持 POSIX，不进入 Windows/macOS/Linux 通用 CI；库和根测试仍是跨平台目标。
-- Scheduler 大量并发取消时 O(n) 查找可能成为瓶颈，目前没有数据要求升级。
-- TaskGroup 保留 wrapper 帧至析构，空间复杂度 O(n)；外部接纳与最终静止点竞态不提供保证。
-- AsyncManualResetEvent 在 set/cancel 调用线程恢复，不隐式保证 RunLoop 亲和；开发者需显式
-  `co_await scheduler.schedule()` 返回目标循环。
-- 本机 mcpp 仍提示 SubOS 缺少 `subos_info`；工具链解析和本次构建、测试、运行未受影响。
-- 当前已完成本机验证，尚未进行 PR 三平台 CI 验证。
+- 共享 FIFO 在大量微小 continuation 与较多 worker 时存在显著 mutex/通知争用；这是已记录的
+  v1 性能上限，不是丢任务或执行失败。
+- ThreadPool 不抢占；长计算或阻塞调用会占住一个 worker。异步 I/O 与专用 blocking pool 尚未
+  实现。
+- 析构会等待已接纳 continuation 返回；用户代码永久阻塞时析构也会永久等待。在自身 worker
+  内析构属于硬生命周期错误并立即终止。
+- 三平台兼容性尚需远程 CI 确认。
+- 本机 mcpp 仍输出 SubOS 缺少 `subos_info` 的环境警告，但本轮所有构建和运行均成功。
 
 ## 剩余工作
 
-本地实现与验证没有剩余项。本阶段 Git 交付以 `feature/phase4-v1-readiness` 上的第四阶段
-提交为边界；PR、合并和对应三平台 CI 仍需用户另行决定。
+1. 用户审查第五阶段实现与压测结论。
+2. 获得明确授权后，才可执行对应范围的 commit、push、PR 或远程 CI 操作。
+3. 第五阶段合并并通过三平台 CI 后，再开始第六阶段异步 I/O / blocking pool 设计；不要把该
+   能力补进当前 ThreadPool。
 
 ## 推荐下一步
 
-确认功能分支远端同步后，由用户决定是否创建 PR 并进行三平台 CI。第四阶段合并后，再单独
-设计第五阶段多 worker 调度，不把第六阶段 I/O 后端提前混入。
+先审查 `src/thread_pool.cppm`、`tests/thread_pool_test.cpp` 和线程池压测报告。若认可当前共享
+FIFO v1 边界，再明确授权所需的 Git/GitHub 步骤完成交付；合并后从第六阶段的 I/O 契约与平台
+边界开始设计。

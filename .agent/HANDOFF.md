@@ -14,9 +14,8 @@ path-dependency consumer。
 
 ## 当前目标与状态
 
-Phase 6A blocking offload v1 与 Phase 6B 第 1–8 项均已作为本地提交完成且尚未推送。Phase 6B
-Plan 第 9 项已同步六份开发文档，并通过未改动的独立示例验证；下一步是第 10 项完整本地门禁
-与状态收口。
+Phase 6A blocking offload v1 与 Phase 6B 第 1–10 项均已在当前分支本地完成且尚未推送。Phase
+6B 完整本地门禁已全部通过，Design/Plan 已标记为“本地实现并验证，远程 CI 待确认”。
 
 ## 已完成工作
 
@@ -197,8 +196,11 @@ Plan 第 9 项已同步六份开发文档，并通过未改动的独立示例验
   500 次 stop/completion 竞态，没有丢失或重复完成。
 - 加入并发负载后，`tcp_test` Dev/Release 均为 24/24；两套 strict cache-off 全量测试均为
   10 个二进制、140/140。32/32 客户端成功，取消、错误、payload/线程不匹配和重复完成均为 0。
-- readiness 新网络路径每轮均为 20,000 成功、100 预期失败、0 非预期失败；五轮网络中位数
-  为 2,071.085 ms / 9,705.1 ops/s，原始结果已写入 benchmark 报告，耗时不作门槛。
+- Phase 6B 最终门禁：focused Release 10/10 通过，覆盖 100 次 close 与 500 次 stop completion
+  竞态；Dev/Release strict cache-off 构建均通过，两套全量测试均为 10 个二进制、140/140。
+- 最终门禁再次运行独立示例成功；readiness Release strict cache-off 构建成功，随后五轮共
+  15 个场景全部 PASS。每轮 compute/file/network 非预期失败均为 0，网络中位数为
+  2,078.127 ms / 9,672.2 ops/s，最新原始数据已写入 benchmark 报告。
 
 ## 已知问题 / 风险
 
@@ -218,10 +220,9 @@ Plan 第 9 项已同步六份开发文档，并通过未改动的独立示例验
 
 ## 剩余工作
 
-1. 按 Phase 6B Plan 第 10 项执行完整本地验证矩阵、example、100 轮竞态门禁与五轮 benchmark。
-2. 本地完成后仍需用户另行授权 push/PR，才能取得 Linux、macOS、Windows 远程 CI 结果。
+1. 本地开发与验证已完成；后续只有在用户另行授权 push/PR 后，才能取得 Linux、macOS、
+   Windows 远程 CI 结果并达到 Design 的最终跨平台完成条件。
 
 ## 推荐下一步
 
-按 `2026-08-30-cmp-phase6b-tcp-client-v1.md` 开始第 10 项，先执行 focused Release TCP 竞态
-门禁，再执行 Dev/Release 全量矩阵、独立示例与五轮 readiness benchmark，准确记录全部结果。
+等待用户另行授权远程操作；在此之前不 push、不创建 PR，也不宣称三平台 CI 已通过。

@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-30
 **Design:** `docs/superpowers/specs/2026-08-29-cmp-phase6b-tcp-client-v1-design.md`
-**Status:** In progress — developer documentation synchronized
+**Status:** Locally complete — remote CI pending
 **Baseline:** Local Phase 6A commit `701aa8b`, 116/116 Dev and Release tests
 
 ## Execution Rule
@@ -442,6 +442,29 @@ Only after local verification:
 
 Phase 6B reaches the Design's final completion state only after Linux, macOS, and Windows CI all
 pass. Until then, report it as locally implemented and verified with remote compatibility pending.
+
+**Self-review — 2026-08-30:** Run the two existing internally repeated Release race tests five
+times, which exercises 100 close/completion and 500 stop/completion races without multiplying the
+whole socket suite or exhausting this host's narrow ephemeral-port range. Any hang, duplicate,
+invalid outcome, failed command, or hard-count mismatch stops the gate. Then run the exact
+cache-off strict Dev/Release matrix, the unchanged path-consumer example, and a Release benchmark
+build followed by five sequential runs of the produced binary. Benchmark timing is evidence only;
+each run must retain exact compute/file/network success and expected-failure counts with zero
+unexpected failures. Record only local Linux/WSL2 facts and leave remote CI pending.
+
+**Completion — 2026-08-30:** The focused Release command was:
+
+```text
+mcpp test tcp_test --profile release --strict --cache=off -- --gtest_filter='CmpTcpTest.CloseCompletionRaceChoosesOneOutcome:CmpTcpTest.StopCompletionRaceChoosesOneOutcome' --gtest_repeat=5
+```
+
+It passed 10/10 focused executions, covering 100 close and 500 stop completion races. Strict
+cache-off Dev and Release builds passed; both full suites passed 140/140 tests across 10 binaries,
+including 24/24 TCP tests. The unchanged standalone example printed every expected line and exited
+0. The readiness Release build passed, followed by five sequential runs: each reported compute
+49,000/1,000/0, file 1,000/100/0, and network 20,000/100/0 success/expected/unexpected counts.
+All 15 scenario rows passed; the final raw timings are recorded in the readiness report. These are
+local Linux/WSL2 + LLVM 22.1.8 results; Linux, macOS, and Windows remote CI remain pending.
 
 ## Scope Guard
 

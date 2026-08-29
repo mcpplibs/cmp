@@ -1,7 +1,7 @@
 # CMP Phase 6B TCP Client v1 Design
 
 **Date:** 2026-08-29
-**Status:** Approved for implementation
+**Status:** Locally implemented and verified — remote CI pending
 **Baseline:** Phase 6A is locally committed as `701aa8b` and passes 116/116 tests
 
 ## Purpose

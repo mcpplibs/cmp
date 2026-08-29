@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-30
 **Design:** `docs/superpowers/specs/2026-08-29-cmp-phase6b-tcp-client-v1-design.md`
-**Status:** In progress — `IoContext` lifecycle gate complete
+**Status:** In progress — native-completion bridge gate complete
 **Baseline:** Local Phase 6A commit `701aa8b`, 116/116 Dev and Release tests
 
 ## Execution Rule
@@ -130,6 +130,18 @@ helper Task. This avoids storing a lazy `this`, `IoContext&`, or address `string
 Each helper captures value/error/cancellation, then awaits `returnTo.schedule()` without a stop
 token before publishing the outcome. Use `std::scope_exit` for direction-admission cleanup rather
 than creating another guard class. A return-Scheduler failure remains the observable exception.
+
+**Completion — 2026-08-30:** Added one private `NativeOperationAwaiter` and shared operation state.
+The completion handler overloads normalize connect and byte-transfer signatures to
+`std::error_code` plus byte count. The state owns the continuation, cancellation signal,
+error/count, cancellation origin, exception, and stop callback; the callback holds only weak
+operation/context references and queues signal emission onto the I/O thread. After successful
+native initiation, only the Asio handler resumes the private coroutine; a synchronous initiation
+exception is the sole pre-initiation direct-resume path. An internal concrete instantiation checks
+the otherwise-private template until Step 4 supplies real socket initiations. Strict cache-off Dev
+and Release builds passed; both full suites passed 117/117 across 10 binaries. Runtime
+completion/cancellation races remain intentionally gated on Step 4's real loopback connect rather
+than a public test hook.
 
 ## 4. Implement connect and the loopback fixture
 

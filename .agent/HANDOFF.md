@@ -14,9 +14,9 @@ path-dependency consumer。
 
 ## 当前目标与状态
 
-Phase 6A blocking offload v1 已作为本地提交 `701aa8b` 完成，尚未推送。Phase 6B TCP client
-v1 已进入实现：Plan 第 1、2 项完成，Asio backend gate 与 `IoContext` 生命周期通过完整 Dev
-验证；尚未实现 native-completion bridge 或 `TcpStream` 公共 API。
+Phase 6A blocking offload v1 与 Phase 6B 第 1–2 项分别作为本地提交 `701aa8b`、`816144f`
+完成，均尚未推送。Phase 6B Plan 第 3 项私有 native-completion bridge 已实现并通过编译门禁；
+尚未实现 `TcpStream` 公共 API 或真实 socket operation。
 
 ## 已完成工作
 
@@ -55,6 +55,16 @@ v1 已进入实现：Plan 第 1、2 项完成，Asio backend gate 与 `IoContext
   线程内自析构会终止而不是 self-join。
 - 新增 `tests/tcp_test.cpp`，以编译期断言锁定 `IoContext` 的默认构造及精确 copy/move traits，
   并以运行测试验证构造、driver 启动、析构关闭和 join 不挂起。
+- 实现唯一的私有 `NativeOperationAwaiter`：一个共享 operation state 保存 continuation、Asio
+  cancellation signal、原始 error/count、取消来源、同步 initiation 异常和 stop callback。
+- completion handler 以一参数/两参数重载把 connect 与 read/write 统一为
+  `std::error_code + transferred bytes`；native initiation 成功后，只有该 handler 可以恢复
+  私有协程，stop/close/shutdown 只能请求 native completion。
+- stop callback 只持有 operation/context 弱引用，并把 stop-token cancellation 排到 I/O 线程
+  后再记录来源、发出 `cancellation_type::all`；context 已停止接纳时由 shutdown close 路径
+  完成 operation。
+- 加入内部具体模板实例作为 Step 3 编译门禁，真实 connect initiation 在 Step 4 接入后删除；
+  没有为私有 bridge 暴露测试 API 或提前加入公共 `TcpStream`。
 
 ## 重要决策
 
@@ -77,6 +87,8 @@ v1 已进入实现：Plan 第 1、2 项完成，Asio backend gate 与 `IoContext
 - socket state 只弱引用 context；共享 context state 由公开 `IoContext` 与 driver 持有，
   socket 不能延长公开 driver 生命周期。v1 registry 使用 O(n) 弱引用扫描，只有实测成本显著
   时才替换。
+- native initiation 成功前的同步异常可以直接恢复私有协程；成功后恢复权只属于 Asio handler。
+  stop callback 不从请求线程 emit、访问 socket 或恢复 coroutine。
 - `TcpStream` 允许一项 pending read 与一项 pending write；同方向重叠直接拒绝，不增加隐式
   排队。主动 close、context shutdown 与已发起 write 的取消均有明确关闭语义。
 - v1 不含 DNS、server、TLS、UDP、文件 I/O、timeout、socket option 或隐式 executor；这些都
@@ -127,8 +139,12 @@ v1 已进入实现：Plan 第 1、2 项完成，Asio backend gate 与 `IoContext
   1/1 测试通过。
 - 加入 `IoContext` 后，`mcpp build --profile dev --strict --cache=off` 再次通过；
   `mcpp test --profile dev --strict --cache=off` 为 10 个二进制、117/117 通过。
-- 本 checkpoint 未运行当前 Phase 6B 的 Release、example 或 benchmark；它们仍属于后续 Plan
-  gate，既有 Phase 6A Release/example/benchmark 结果不代表 TCP API 已实现。
+- 加入 native bridge 后，`mcpp build --profile dev --strict --cache=off` 与
+  `mcpp build --profile release --strict --cache=off` 均通过；Dev 与 Release 全量测试均为 10 个
+  二进制、117/117 通过。
+- 当前 bridge 没有公共 socket operation，因而尚无真实 completion/cancellation runtime test；
+  该门禁在 Step 4 的 loopback connect 测试完成。当前未重复执行 example 或 benchmark，既有
+  Phase 6A 结果不代表 TCP API 已实现。
 
 ## 已知问题 / 风险
 
@@ -141,20 +157,21 @@ v1 已进入实现：Plan 第 1、2 项完成，Asio backend gate 与 `IoContext
 - 三平台兼容性仍需远程 CI 确认。
 - `chriskohlhoff.asio@1.38.1` 只在本机 Linux/WSL2 + LLVM 22.1.8 完成模块编译；macOS 与
   Windows 仍需后续远程 CI 验证。
-- Phase 6B 当前只有 backend 与 `IoContext` 生命周期；native-completion bridge、`TcpStream`
-  connect/read/write、取消竞态和 benchmark 迁移均尚未实现。
+- Phase 6B 当前已有 backend、`IoContext` 生命周期和私有 native-completion bridge；bridge 的
+  runtime exactly-once/cancellation 尚待真实 socket 测试，`TcpStream` connect/read/write、
+  close 竞态和 benchmark 迁移均尚未实现。
 - 单 I/O driver 是 v1 的刻意简化；只有 benchmark 证明它是瓶颈后才设计多 driver/strand。
 
 ## 剩余工作
 
-1. 按 Phase 6B Plan 第 3 项实现唯一的 native-completion bridge，锁定只有 Asio handler 能在
-   native initiation 后恢复私有协程，并准备统一的 error/count/cancellation state。
+1. 按 Phase 6B Plan 第 4 项实现 `TcpStream::connect()` 和同步 Asio loopback fixture，删除内部
+   bridge 编译 probe，并以真实 connect 锁定 laziness、地址复制、错误、取消和返回线程亲和。
 2. 完成本地 Dev/Release、race、example 与五轮 readiness 验证后，再等待远程三平台 CI 所需
    的单独授权。
-3. 当前 Phase 6B 代码、manifest、Design、Plan 与 HANDOFF 均未提交；是否创建本地提交、
-   Push、PR 或 CI 均需对应明确授权。
+3. Phase 6B 第 1–2 项已本地提交为 `816144f`；当前 bridge、Plan 与 HANDOFF 尚未提交。Push、
+   PR 或 CI 均需对应明确授权。
 
 ## 推荐下一步
 
-按 `2026-08-30-cmp-phase6b-tcp-client-v1.md` 开始第 3 项，只实现私有 native-completion
-bridge 及其 exactly-once/cancellation 基础；connect 与 loopback fixture 留到第 4 项。
+按 `2026-08-30-cmp-phase6b-tcp-client-v1.md` 开始第 4 项，实现 numeric-address
+`TcpStream::connect()` 与单一同步 Asio loopback fixture，并用真实 operation 验证 bridge。

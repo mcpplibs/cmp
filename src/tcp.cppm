@@ -8,6 +8,14 @@ import :task;
 namespace mcpplibs::cmp::detail {
 
 class TcpSocketState;
+struct NativeOperationState;
+
+enum class NativeCancellationOrigin {
+    none,
+    stop_token,
+    stream_close,
+    context_shutdown
+};
 
 class IoContextState final {
 private:
@@ -75,10 +83,14 @@ private:
     std::weak_ptr<IoContextState> context_ {};
     std::optional<asio::ip::tcp::socket> socket_ {};
     std::atomic<bool> logicallyOpen_ { false };
+    std::atomic<bool> closeRequested_ { false };
     std::atomic<bool> readPending_ { false };
     std::atomic<bool> writePending_ { false };
     std::mutex readTerminalMutex_ {};
     std::optional<std::error_code> readTerminal_ {};
+    std::weak_ptr<NativeOperationState> connectOperation_ {};
+    std::weak_ptr<NativeOperationState> readOperation_ {};
+    std::weak_ptr<NativeOperationState> writeOperation_ {};
 
 public:
     explicit TcpSocketState(
@@ -118,8 +130,20 @@ public:
         }
     }
 
+    [[nodiscard]] bool is_open() const noexcept {
+        return logicallyOpen_.load(std::memory_order_acquire);
+    }
+
+    [[nodiscard]] bool close_requested() const noexcept {
+        return closeRequested_.load(std::memory_order_acquire);
+    }
+
     [[nodiscard]] bool read_available() {
         const std::lock_guard lock { readTerminalMutex_ };
+
+        if (closeRequested_.load(std::memory_order_acquire)) {
+            return false;
+        }
 
         if (logicallyOpen_.load(std::memory_order_acquire)) {
             return true;
@@ -182,6 +206,18 @@ public:
         readTerminal_ = error;
     }
 
+    void attach_connect_operation_on_driver(
+        const std::shared_ptr<NativeOperationState>& operation) noexcept;
+
+    void attach_read_operation_on_driver(
+        const std::shared_ptr<NativeOperationState>& operation) noexcept;
+
+    void attach_write_operation_on_driver(
+        const std::shared_ptr<NativeOperationState>& operation) noexcept;
+
+    void cancel_and_close_on_driver(
+        NativeCancellationOrigin origin) noexcept;
+
     void close_on_driver() noexcept {
         logicallyOpen_.store(false, std::memory_order_release);
 
@@ -196,6 +232,8 @@ public:
 
     void request_close(
         const std::shared_ptr<TcpSocketState>& self) noexcept {
+        closeRequested_.store(true, std::memory_order_release);
+
         if (!logicallyOpen_.exchange(false, std::memory_order_acq_rel)) {
             return;
         }
@@ -208,7 +246,8 @@ public:
 
         try {
             context->post([self] noexcept {
-                self->close_on_driver();
+                self->cancel_and_close_on_driver(
+                    NativeCancellationOrigin::stream_close);
             });
         } catch (const std::logic_error&) {
             // Shutdown 已接管 registry 中的 socket。
@@ -221,20 +260,14 @@ public:
 void IoContextState::shutdown_on_driver_() noexcept {
     for (auto& registered : sockets_) {
         if (const auto socket = registered.lock()) {
-            socket->close_on_driver();
+            socket->cancel_and_close_on_driver(
+                NativeCancellationOrigin::context_shutdown);
         }
     }
 
     sockets_.clear();
     workGuard_.reset();
 }
-
-enum class NativeCancellationOrigin {
-    none,
-    stop_token,
-    stream_close,
-    context_shutdown
-};
 
 struct NativeOperationState final {
     struct Result final {
@@ -301,6 +334,10 @@ struct NativeOperationState final {
 
     void request_cancellation_on_driver(
         NativeCancellationOrigin origin) noexcept {
+        if (origin == NativeCancellationOrigin::none) {
+            std::terminate();
+        }
+
         if (completed_ || cancellation_ != NativeCancellationOrigin::none) {
             return;
         }
@@ -338,6 +375,48 @@ private:
         continuation.resume();
     }
 };
+
+void TcpSocketState::attach_connect_operation_on_driver(
+    const std::shared_ptr<NativeOperationState>& operation) noexcept {
+    if (!operation || !connectOperation_.expired()) {
+        std::terminate();
+    }
+
+    connectOperation_ = operation;
+}
+
+void TcpSocketState::attach_read_operation_on_driver(
+    const std::shared_ptr<NativeOperationState>& operation) noexcept {
+    if (!operation || !readOperation_.expired()) {
+        std::terminate();
+    }
+
+    readOperation_ = operation;
+}
+
+void TcpSocketState::attach_write_operation_on_driver(
+    const std::shared_ptr<NativeOperationState>& operation) noexcept {
+    if (!operation || !writeOperation_.expired()) {
+        std::terminate();
+    }
+
+    writeOperation_ = operation;
+}
+
+void TcpSocketState::cancel_and_close_on_driver(
+    NativeCancellationOrigin origin) noexcept {
+    const auto cancel = [origin](
+        const std::weak_ptr<NativeOperationState>& operation) noexcept {
+        if (const auto locked = operation.lock()) {
+            locked->request_cancellation_on_driver(origin);
+        }
+    };
+
+    cancel(connectOperation_);
+    cancel(readOperation_);
+    cancel(writeOperation_);
+    close_on_driver();
+}
 
 void NativeOperationState::StopRequest::operator()() const noexcept {
     const auto operation = operation_.lock();
@@ -417,6 +496,7 @@ public:
                     NativeOperationState::CompletionHandler { operation });
                 std::invoke(
                     std::move(initiation),
+                    operation,
                     std::move(completion));
             } catch (...) {
                 operation->fail_initiation_on_driver(
@@ -532,9 +612,17 @@ public:
     TcpStream& operator=(TcpStream&&) = delete;
 
     ~TcpStream() {
+        close();
+    }
+
+    void close() noexcept {
         if (state_) {
             state_->request_close(state_);
         }
+    }
+
+    [[nodiscard]] bool is_open() const noexcept {
+        return state_ && state_->is_open();
     }
 
     template<typename ReturnScheduler>
@@ -604,7 +692,7 @@ Task<TcpStream> TcpStream::connect_impl_(
                 numericAddress = std::move(numericAddress),
                 port,
                 stopToken
-            ](auto completion) mutable {
+            ](const auto& operation, auto completion) mutable {
                 if (stopToken.stop_requested()) {
                     throw OperationCancelled {};
                 }
@@ -622,6 +710,7 @@ Task<TcpStream> TcpStream::connect_impl_(
                     context);
                 connectState->socket_ = socket;
                 context->register_socket_on_driver(socket);
+                socket->attach_connect_operation_on_driver(operation);
                 socket->socket_on_driver().async_connect(
                     asio::ip::tcp::endpoint { address, port },
                     std::move(completion));
@@ -714,7 +803,15 @@ Task<std::size_t> TcpStream::read_some_impl_(
                     context,
                     stopToken,
                     state,
-                    [state, buffer](auto completion) mutable {
+                    [state, buffer](
+                        const auto& operation,
+                        auto completion) mutable {
+                        state->attach_read_operation_on_driver(operation);
+
+                        if (state->close_requested()) {
+                            throw OperationCancelled {};
+                        }
+
                         state->socket_on_driver().async_read_some(
                             asio::buffer(
                                 buffer.data(),
@@ -813,7 +910,15 @@ Task<void> TcpStream::write_all_impl_(
                 context,
                 stopToken,
                 state,
-                [state, buffer](auto completion) mutable {
+                [state, buffer](
+                    const auto& operation,
+                    auto completion) mutable {
+                    state->attach_write_operation_on_driver(operation);
+
+                    if (state->close_requested()) {
+                        throw OperationCancelled {};
+                    }
+
                     asio::async_write(
                         state->socket_on_driver(),
                         asio::buffer(
@@ -824,13 +929,14 @@ Task<void> TcpStream::write_all_impl_(
             };
 
             if (native.error_) {
-                state->close_on_driver();
-
                 if (native.cancellation_ !=
                     detail::NativeCancellationOrigin::none) {
+                    state->cancel_and_close_on_driver(
+                        native.cancellation_);
                     throw OperationCancelled {};
                 }
 
+                state->close_on_driver();
                 throw std::system_error { native.error_ };
             }
 

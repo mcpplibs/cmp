@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-30
 **Design:** `docs/superpowers/specs/2026-08-29-cmp-phase6b-tcp-client-v1-design.md`
-**Status:** In progress — read/write gate complete
+**Status:** In progress — cancellation/close/shutdown gate complete
 **Baseline:** Local Phase 6A commit `701aa8b`, 116/116 Dev and Release tests
 
 ## Execution Rule
@@ -278,6 +278,31 @@ Prove a read is admitted before requesting active cancellation by using the dete
 same-direction-overlap rejection while the server withholds data. For races, release server data
 and request stop/close from a barrier; accept either documented winner but assert exactly one
 completion and no duplicate buffer access.
+
+**Self-review — 2026-08-30:** Each socket keeps weak connect/read/write operation slots populated
+on the I/O thread before native initiation. Stop, explicit close, and context shutdown serialize on
+that thread, record only the first local cancellation origin, and then ask the same Asio handler to
+complete; none resumes a coroutine directly. Local cancel-and-close tags every live operation,
+while an unrelated socket error performs an untagged native close and remains `system_error`.
+Because an initiated write cancellation closes the whole stream, it also tags a simultaneous read
+as locally cancelled. `close()` flips the atomic logical state before posting, so `is_open()` and
+later admission observe closure immediately. Race tests accept exactly one documented outcome and
+use barriers/semaphores only; the close race uses a bounded connection count to respect this host's
+small ephemeral-port range.
+
+The review also found a validation-to-initiation close window. A socket-local atomic close-request
+marker now makes an already-admitted read/write report `OperationCancelled` if explicit close wins
+before native initiation; closed-resource validation still precedes a pre-stopped token.
+
+**Completion — 2026-08-30:** Added thread-safe `close()`/`is_open()` and made destruction use the
+same idempotent close request. Weak per-direction operation slots let stop, close, write
+cancellation, and context shutdown record local provenance on the I/O thread before native close;
+only the Asio completion handler resumes an initiated operation. Tests cover active/pre-
+cancellation, stream reuse, close idempotence and moved-from behavior, write cancellation,
+close/completion and stop/completion races, context drain/join, surviving handles, return affinity,
+and resource-error precedence. Focused Dev/Release passed 23/23; both full suites passed 139/139
+across 10 binaries. Five focused Release repetitions passed 10/10 tests, representing 100 close
+races and 500 stop races with no lost or duplicate completion.
 
 ## 7. Add the load and cross-platform gate
 

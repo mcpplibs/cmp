@@ -6,7 +6,7 @@ CMP 是使用 mcpp 构建的 C++23 Modules 协程运行时库，公开模块为 
 懒启动单消费者 `Task<T>`、变参/vector `when_all()`、静止点 `TaskGroup`、一次性与可复用
 事件、RAII `AsyncMutex`、带定时和取消的调用线程 `RunLoop`、固定大小的 `ThreadPool`，以及
 用于隔离同步调用的 `run_blocking()`。Phase 6B 已加入拥有单一私有 I/O driver 的
-`IoContext` 生命周期骨架。
+`IoContext`，以及数值地址 TCP client 的 connect/read/write、取消和关闭生命周期。
 
 `.xlings.json` 固定 mcpp 2026.8.11.2；当前工具链为 LLVM 22.1.8，运行时依赖为
 `chriskohlhoff.asio` 1.38.1，测试依赖为 `compat.gtest` 1.15.2。`examples/basic` 是独立
@@ -14,9 +14,9 @@ path-dependency consumer。
 
 ## 当前目标与状态
 
-Phase 6A blocking offload v1、Phase 6B 第 1–3 项与第 4 项分别作为本地提交 `701aa8b`、
-`816144f`、`76bb9bd`、`4f05767` 完成，均尚未推送。Phase 6B Plan 第 5 项 read/write、EOF 与
-overlap 已实现并通过本地门禁；公开 close/cancellation/shutdown 竞态尚未实现。
+Phase 6A blocking offload v1 与 Phase 6B 第 1–5 项已作为本地提交完成，最新为 Step 5
+`a73c113`，均尚未推送。Phase 6B Plan 第 6 项 close/cancellation/shutdown 竞态已实现并通过
+本地门禁；下一步是第 7 项并发负载与跨平台门禁准备。
 
 ## 已完成工作
 
@@ -85,6 +85,14 @@ overlap 已实现并通过本地门禁；公开 close/cancellation/shutdown 竞�
   异常两条路径显式释放 admission，没有新增 guard abstraction 或依赖。
 - 同一 loopback fixture 增加小型同步 protocol callback、partial/EOF/duplex gate 与
   `reuse_address`，没有增加 public server 或固定 sleep。
+- 新增线程安全、幂等、非阻塞且 `noexcept` 的 `TcpStream::close()` 与 `is_open()`；析构复用
+  同一关闭请求，move 后仅新 handle 保有关闭所有权。
+- socket 以弱引用记录 connect/read/write operation；stop、显式 close、write cancellation 与
+  context shutdown 在 I/O 线程记录首个本地取消来源，再由唯一 native handler 恢复协程。
+- 显式关闭请求使用原子标记覆盖公开校验到 native initiation 的窄窗口；已接纳操作在 close
+  获胜时稳定得到 `OperationCancelled`，而无关 socket error 仍保留 `system_error`。
+- TCP 测试新增 active/pre-cancellation、关闭幂等、move、write cancellation、两类完成竞态、
+  context drain/join 和 surviving handle 边界，当前 `tcp_test` 为 23 项。
 
 ## 重要决策
 
@@ -109,6 +117,8 @@ overlap 已实现并通过本地门禁；公开 close/cancellation/shutdown 竞�
   时才替换。
 - native initiation 成功前的同步异常可以直接恢复私有协程；成功后恢复权只属于 Asio handler。
   stop callback 不从请求线程 emit、访问 socket 或恢复 coroutine。
+- 显式 close 立即发布逻辑关闭状态，再把取消与 native close 排到 I/O 线程；资源失效检查先于
+  pre-cancellation，远端 EOF 不关闭本地写方向。
 - `TcpStream` 允许一项 pending read 与一项 pending write；同方向重叠直接拒绝，不增加隐式
   排队。主动 close、context shutdown 与已发起 write 的取消均有明确关闭语义。
 - v1 不含 DNS、server、TLS、UDP、文件 I/O、timeout、socket option 或隐式 executor；这些都
@@ -173,6 +183,10 @@ overlap 已实现并通过本地门禁；公开 close/cancellation/shutdown 竞�
 - 曾尝试 Release 整套重复 100 轮；前 24 轮 360/360 通过，第 25 轮因本机临时端口范围仅
   `60700–61000` 而出现 `Address already in use`。fixture 随后增加 `reuse_address`，上述 10 轮
   整套与 50 轮 overlap 复验通过；该次资源耗尽不计为功能通过，也未隐藏。
+- close/cancellation/shutdown 定向 `tcp_test` 在 Dev 与 Release 均为 23/23 通过；两套 strict
+  cache-off 全量测试均为 10 个二进制、139/139 通过。
+- Release 两项完成竞态连续执行 5 轮共 10/10 测试通过，覆盖 100 次 close/completion 与
+  500 次 stop/completion 竞态，没有丢失或重复完成。
 
 ## 已知问题 / 风险
 
@@ -185,20 +199,19 @@ overlap 已实现并通过本地门禁；公开 close/cancellation/shutdown 竞�
 - 三平台兼容性仍需远程 CI 确认。
 - `chriskohlhoff.asio@1.38.1` 只在本机 Linux/WSL2 + LLVM 22.1.8 完成模块编译；macOS 与
   Windows 仍需后续远程 CI 验证。
-- Phase 6B 当前已有 backend、`IoContext`、native bridge、connect/read/write 与 EOF/overlap；
-  pending operation 主动取消、公开 close/is_open、shutdown 竞态和 benchmark 迁移仍待后续步骤。
+- Phase 6B 本地已有 backend、`IoContext`、native bridge、connect/read/write、EOF/overlap、
+  pending cancellation、close/is_open 与 shutdown 竞态；并发负载、readiness TCP client 迁移、
+  文档同步和最终本地矩阵仍待后续步骤。
 - 单 I/O driver 是 v1 的刻意简化；只有 benchmark 证明它是瓶颈后才设计多 driver/strand。
 
 ## 剩余工作
 
-1. 按 Phase 6B Plan 第 6 项实现公开 `close()`/`is_open()`，补齐 stop/close/context shutdown
-   cancellation provenance 与 exactly-once race tests。
-2. 完成本地 Dev/Release、race、example 与五轮 readiness 验证后，再等待远程三平台 CI 所需
-   的单独授权。
-3. Phase 6B 第 4 项已本地提交为 `4f05767`；当前 read/write、测试、Plan 与 HANDOFF 尚未提交。
-   Push、PR 或 CI 均需对应明确授权。
+1. 按 Phase 6B Plan 第 7 项增加有界的多客户端并发负载测试，并完成两类竞态各至少 100 轮的
+   Release 门禁。
+2. 继续第 8–10 项：迁移 readiness TCP client、同步六份开发文档并执行完整本地验证矩阵。
+3. 本地完成后仍需用户另行授权 push/PR，才能取得 Linux、macOS、Windows 远程 CI 结果。
 
 ## 推荐下一步
 
-按 `2026-08-30-cmp-phase6b-tcp-client-v1.md` 开始第 6 项，在现有 state/bridge 上补齐公开
-close/is_open、取消来源与 stop/close/shutdown exactly-once 竞态，不引入 timeout 或队列。
+按 `2026-08-30-cmp-phase6b-tcp-client-v1.md` 开始第 7 项，在现有 loopback fixture 内加入
+跨平台有界并发客户端门禁，不增加 public server、通用 executor 或新依赖。

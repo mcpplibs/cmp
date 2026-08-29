@@ -32,6 +32,8 @@ static_assert(std::move_constructible<TcpStream>);
 static_assert(std::is_nothrow_move_constructible_v<TcpStream>);
 static_assert(!std::is_copy_assignable_v<TcpStream>);
 static_assert(!std::is_move_assignable_v<TcpStream>);
+static_assert(noexcept(std::declval<TcpStream&>().close()));
+static_assert(noexcept(std::declval<const TcpStream&>().is_open()));
 
 class LoopbackServer final {
 public:
@@ -439,6 +441,264 @@ Task<WriteOverlapObservation> reject_second_write(
     co_return WriteOverlapObservation { true, rejected };
 }
 
+struct OperationObservation final {
+    int completions_ {};
+    std::size_t transferred_ {};
+    bool cancelled_ {};
+    bool logicError_ {};
+    bool systemError_ {};
+    bool unexpected_ {};
+    std::thread::id resumedThread_ {};
+};
+
+Task<void> observe_read(
+    TcpStream& stream,
+    RunLoop::Scheduler returnTo,
+    std::span<std::byte> buffer,
+    OperationObservation& observation,
+    std::stop_token stopToken = {}) {
+    try {
+        observation.transferred_ = co_await stream.read_some(
+            std::move(returnTo),
+            buffer,
+            std::move(stopToken));
+    } catch (const OperationCancelled&) {
+        observation.cancelled_ = true;
+    } catch (const std::logic_error&) {
+        observation.logicError_ = true;
+    } catch (const std::system_error&) {
+        observation.systemError_ = true;
+    } catch (...) {
+        observation.unexpected_ = true;
+    }
+
+    ++observation.completions_;
+    observation.resumedThread_ = std::this_thread::get_id();
+}
+
+Task<void> observe_write(
+    TcpStream& stream,
+    RunLoop::Scheduler returnTo,
+    std::span<const std::byte> buffer,
+    OperationObservation& observation,
+    std::stop_token stopToken = {}) {
+    try {
+        co_await stream.write_all(
+            std::move(returnTo),
+            buffer,
+            std::move(stopToken));
+    } catch (const OperationCancelled&) {
+        observation.cancelled_ = true;
+    } catch (const std::logic_error&) {
+        observation.logicError_ = true;
+    } catch (const std::system_error&) {
+        observation.systemError_ = true;
+    } catch (...) {
+        observation.unexpected_ = true;
+    }
+
+    ++observation.completions_;
+    observation.resumedThread_ = std::this_thread::get_id();
+}
+
+struct ActiveReadCancellationObservation final {
+    OperationObservation operation_ {};
+    bool overlapRejected_ {};
+    std::size_t reuseRead_ {};
+};
+
+Task<ActiveReadCancellationObservation> cancel_pending_read(
+    TcpStream& stream,
+    RunLoop::Scheduler returnTo,
+    std::stop_source& stopSource,
+    std::binary_semaphore& allowServerWrite) {
+    std::array<std::byte, 1> pendingBuffer {};
+    std::array<std::byte, 1> overlapBuffer {};
+    std::array<std::byte, 1> reuseBuffer {};
+    ActiveReadCancellationObservation result {};
+    TaskGroup group {};
+    group.spawn(observe_read(
+        stream,
+        returnTo,
+        pendingBuffer,
+        result.operation_,
+        stopSource.get_token()));
+
+    try {
+        static_cast<void>(co_await stream.read_some(
+            returnTo,
+            overlapBuffer));
+    } catch (const std::logic_error&) {
+        result.overlapRejected_ = true;
+    } catch (...) {
+    }
+
+    stopSource.request_stop();
+    co_await group.join();
+    allowServerWrite.release();
+    result.reuseRead_ = co_await stream.read_some(
+        returnTo,
+        reuseBuffer);
+    co_return result;
+}
+
+struct CloseReadObservation final {
+    OperationObservation operation_ {};
+    bool overlapRejected_ {};
+};
+
+Task<CloseReadObservation> close_pending_read(
+    TcpStream& stream,
+    RunLoop::Scheduler returnTo) {
+    std::array<std::byte, 1> pendingBuffer {};
+    std::array<std::byte, 1> overlapBuffer {};
+    CloseReadObservation result {};
+    TaskGroup group {};
+    group.spawn(observe_read(
+        stream,
+        returnTo,
+        pendingBuffer,
+        result.operation_));
+
+    try {
+        static_cast<void>(co_await stream.read_some(
+            returnTo,
+            overlapBuffer));
+    } catch (const std::logic_error&) {
+        result.overlapRejected_ = true;
+    } catch (...) {
+    }
+
+    stream.close();
+    stream.close();
+    co_await group.join();
+    co_return result;
+}
+
+struct ActiveWriteCancellationObservation final {
+    OperationObservation operation_ {};
+    bool overlapRejected_ {};
+};
+
+Task<ActiveWriteCancellationObservation> cancel_pending_write(
+    TcpStream& stream,
+    RunLoop::Scheduler returnTo,
+    std::span<const std::byte> buffer,
+    std::stop_source& stopSource) {
+    const std::array overlapByte { std::byte { 0x11 } };
+    ActiveWriteCancellationObservation result {};
+    TaskGroup group {};
+    group.spawn(observe_write(
+        stream,
+        returnTo,
+        buffer,
+        result.operation_,
+        stopSource.get_token()));
+
+    try {
+        co_await stream.write_all(returnTo, overlapByte);
+    } catch (const std::logic_error&) {
+        result.overlapRejected_ = true;
+    } catch (...) {
+    }
+
+    stopSource.request_stop();
+    co_await group.join();
+    co_return result;
+}
+
+Task<OperationObservation> destroy_context_with_pending_read(
+    std::unique_ptr<IoContext>& context,
+    TcpStream& stream,
+    RunLoop::Scheduler returnTo) {
+    std::array<std::byte, 1> buffer {};
+    OperationObservation result {};
+    TaskGroup group {};
+    group.spawn(observe_read(
+        stream,
+        returnTo,
+        buffer,
+        result));
+
+    std::jthread destroyer { [&context] {
+        context.reset();
+    } };
+    co_await group.join();
+    destroyer.join();
+    co_return result;
+}
+
+Task<OperationObservation> run_close_completion_race(
+    TcpStream& stream,
+    RunLoop::Scheduler returnTo,
+    std::barrier<>& start) {
+    std::array<std::byte, 1> buffer {};
+    OperationObservation result {};
+    TaskGroup group {};
+    group.spawn(observe_read(
+        stream,
+        returnTo,
+        buffer,
+        result));
+
+    std::jthread closer { [&stream, &start] {
+        start.arrive_and_wait();
+        stream.close();
+    } };
+    co_await group.join();
+    closer.join();
+    co_return result;
+}
+
+struct RaceCounts final {
+    int completed_ {};
+    int cancelled_ {};
+    int invalid_ {};
+};
+
+Task<RaceCounts> run_stop_completion_races(
+    TcpStream& stream,
+    RunLoop::Scheduler returnTo,
+    std::barrier<>& start,
+    int raceCount) {
+    RaceCounts counts {};
+
+    for (int index { 0 }; index < raceCount; ++index) {
+        std::array<std::byte, 1> buffer {};
+        std::stop_source stopSource {};
+        OperationObservation result {};
+        TaskGroup group {};
+        group.spawn(observe_read(
+            stream,
+            returnTo,
+            buffer,
+            result,
+            stopSource.get_token()));
+
+        std::jthread stopper { [&stopSource, &start] {
+            start.arrive_and_wait();
+            stopSource.request_stop();
+        } };
+        co_await group.join();
+        stopper.join();
+
+        if (result.completions_ != 1 ||
+            result.logicError_ ||
+            result.systemError_ ||
+            result.unexpected_) {
+            ++counts.invalid_;
+        } else if (result.cancelled_) {
+            ++counts.cancelled_;
+        } else if (result.transferred_ == 1) {
+            ++counts.completed_;
+        } else {
+            ++counts.invalid_;
+        }
+    }
+
+    co_return counts;
+}
+
 TEST(CmpTcpTest, IoContextStartsAndStopsCleanly) {
     IoContext context {};
 }
@@ -787,6 +1047,7 @@ TEST(CmpTcpTest, DeliversAllBytesBeforeStickyEof) {
     EXPECT_EQ(observation.bytes_, payload);
     EXPECT_EQ(observation.repeatedEof_, 0U);
     EXPECT_EQ(observation.resumedThread_, std::this_thread::get_id());
+    EXPECT_TRUE(stream.is_open());
 }
 
 TEST(CmpTcpTest, SupportsOneSimultaneousReadAndWrite) {
@@ -941,6 +1202,331 @@ TEST(CmpTcpTest, RejectsASecondPendingWrite) {
     EXPECT_TRUE(observation.workerEntered_);
     EXPECT_TRUE(observation.rejected_);
     EXPECT_EQ(received, expected);
+}
+
+TEST(CmpTcpTest, CancelsPendingReadAndKeepsStreamUsable) {
+    std::binary_semaphore allowServerWrite { 0 };
+    std::binary_semaphore serverDone { 0 };
+    std::atomic<bool> gateTimedOut { false };
+    LoopbackServer server {
+        asio::ip::address_v4::loopback(),
+        [&](asio::ip::tcp::socket& socket) {
+            const bool released = allowServerWrite.try_acquire_for(2s);
+            gateTimedOut.store(!released, std::memory_order_release);
+            const std::array oneByte { std::byte { 0x21 } };
+            const std::array twoBytes {
+                std::byte { 0x21 },
+                std::byte { 0x22 }
+            };
+            std::error_code ignored {};
+
+            if (released) {
+                asio::write(socket, asio::buffer(oneByte), ignored);
+            } else {
+                asio::write(socket, asio::buffer(twoBytes), ignored);
+            }
+
+            serverDone.release();
+        }
+    };
+    ASSERT_TRUE(server.available()) << server.start_error().message();
+    ASSERT_TRUE(server.wait_until_ready());
+
+    IoContext context {};
+    RunLoop loop {};
+    std::stop_source stopSource {};
+    auto stream = loop.run(TcpStream::connect(
+        context,
+        loop.get_scheduler(),
+        "127.0.0.1",
+        server.port()));
+    const auto observation = loop.run(cancel_pending_read(
+        stream,
+        loop.get_scheduler(),
+        stopSource,
+        allowServerWrite));
+
+    ASSERT_TRUE(serverDone.try_acquire_for(2s));
+    EXPECT_FALSE(gateTimedOut.load(std::memory_order_acquire));
+    EXPECT_TRUE(observation.overlapRejected_);
+    EXPECT_EQ(observation.operation_.completions_, 1);
+    EXPECT_TRUE(observation.operation_.cancelled_);
+    EXPECT_FALSE(observation.operation_.logicError_);
+    EXPECT_FALSE(observation.operation_.systemError_);
+    EXPECT_FALSE(observation.operation_.unexpected_);
+    EXPECT_EQ(observation.operation_.resumedThread_,
+              std::this_thread::get_id());
+    EXPECT_EQ(observation.reuseRead_, 1U);
+    EXPECT_TRUE(stream.is_open());
+}
+
+TEST(CmpTcpTest, PreCancellationLeavesOpenStreamUsable) {
+    LoopbackServer server { asio::ip::address_v4::loopback() };
+    ASSERT_TRUE(server.available()) << server.start_error().message();
+    ASSERT_TRUE(server.wait_until_ready());
+
+    IoContext context {};
+    RunLoop loop {};
+    std::stop_source stopSource {};
+    stopSource.request_stop();
+    auto stream = loop.run(TcpStream::connect(
+        context,
+        loop.get_scheduler(),
+        "127.0.0.1",
+        server.port()));
+    std::array<std::byte, 1> buffer {};
+
+    EXPECT_THROW(
+        loop.run(stream.read_some(
+            loop.get_scheduler(),
+            buffer,
+            stopSource.get_token())),
+        OperationCancelled);
+    EXPECT_THROW(
+        loop.run(stream.write_all(
+            loop.get_scheduler(),
+            buffer,
+            stopSource.get_token())),
+        OperationCancelled);
+    EXPECT_TRUE(stream.is_open());
+}
+
+TEST(CmpTcpTest, CloseCancelsPendingReadAndIsIdempotent) {
+    LoopbackServer server { asio::ip::address_v4::loopback() };
+    ASSERT_TRUE(server.available()) << server.start_error().message();
+    ASSERT_TRUE(server.wait_until_ready());
+
+    IoContext context {};
+    RunLoop loop {};
+    auto stream = loop.run(TcpStream::connect(
+        context,
+        loop.get_scheduler(),
+        "127.0.0.1",
+        server.port()));
+    const auto observation = loop.run(close_pending_read(
+        stream,
+        loop.get_scheduler()));
+
+    EXPECT_TRUE(observation.overlapRejected_);
+    EXPECT_EQ(observation.operation_.completions_, 1);
+    EXPECT_TRUE(observation.operation_.cancelled_);
+    EXPECT_FALSE(observation.operation_.logicError_);
+    EXPECT_FALSE(observation.operation_.systemError_);
+    EXPECT_FALSE(observation.operation_.unexpected_);
+    EXPECT_FALSE(stream.is_open());
+    EXPECT_NO_THROW(stream.close());
+
+    std::stop_source stopSource {};
+    stopSource.request_stop();
+    std::array<std::byte, 1> buffer {};
+    EXPECT_THROW(
+        loop.run(stream.read_some(
+            loop.get_scheduler(),
+            buffer,
+            stopSource.get_token())),
+        std::logic_error);
+    EXPECT_THROW(
+        loop.run(stream.write_all(
+            loop.get_scheduler(),
+            buffer,
+            stopSource.get_token())),
+        std::logic_error);
+}
+
+TEST(CmpTcpTest, MoveTransfersCloseOwnershipAndMovedFromUseFails) {
+    LoopbackServer server { asio::ip::address_v4::loopback() };
+    ASSERT_TRUE(server.available()) << server.start_error().message();
+    ASSERT_TRUE(server.wait_until_ready());
+
+    IoContext context {};
+    RunLoop loop {};
+    auto stream = loop.run(TcpStream::connect(
+        context,
+        loop.get_scheduler(),
+        "127.0.0.1",
+        server.port()));
+    TcpStream moved { std::move(stream) };
+    std::array<std::byte, 1> buffer {};
+
+    EXPECT_FALSE(stream.is_open());
+    EXPECT_TRUE(moved.is_open());
+    EXPECT_NO_THROW(stream.close());
+    EXPECT_THROW(
+        loop.run(stream.read_some(loop.get_scheduler(), buffer)),
+        std::logic_error);
+    EXPECT_THROW(
+        loop.run(stream.write_all(loop.get_scheduler(), buffer)),
+        std::logic_error);
+
+    moved.close();
+    moved.close();
+    EXPECT_FALSE(moved.is_open());
+}
+
+TEST(CmpTcpTest, CancellingPendingWriteClosesStream) {
+    LoopbackServer server { asio::ip::address_v4::loopback() };
+    ASSERT_TRUE(server.available()) << server.start_error().message();
+    ASSERT_TRUE(server.wait_until_ready());
+
+    IoContext context {};
+    RunLoop loop {};
+    std::stop_source stopSource {};
+    std::vector<std::byte> buffer(
+        8U * 1024U * 1024U,
+        std::byte { 0x2a });
+    auto stream = loop.run(TcpStream::connect(
+        context,
+        loop.get_scheduler(),
+        "127.0.0.1",
+        server.port()));
+    const auto observation = loop.run(cancel_pending_write(
+        stream,
+        loop.get_scheduler(),
+        buffer,
+        stopSource));
+
+    EXPECT_TRUE(observation.overlapRejected_);
+    EXPECT_EQ(observation.operation_.completions_, 1);
+    EXPECT_TRUE(observation.operation_.cancelled_);
+    EXPECT_FALSE(observation.operation_.logicError_);
+    EXPECT_FALSE(observation.operation_.systemError_);
+    EXPECT_FALSE(observation.operation_.unexpected_);
+    EXPECT_FALSE(stream.is_open());
+}
+
+TEST(CmpTcpTest, CloseCompletionRaceChoosesOneOutcome) {
+    constexpr int RACE_COUNT { 20 };
+    IoContext context {};
+    RunLoop loop {};
+    int completed {};
+    int cancelled {};
+    int invalid {};
+
+    for (int iteration { 0 }; iteration < RACE_COUNT; ++iteration) {
+        std::barrier start { 2 };
+        LoopbackServer server {
+            asio::ip::address_v4::loopback(),
+            [&](asio::ip::tcp::socket& socket) {
+                start.arrive_and_wait();
+                const std::array byte { std::byte { 0x2b } };
+                std::error_code ignored {};
+                asio::write(socket, asio::buffer(byte), ignored);
+            }
+        };
+        ASSERT_TRUE(server.available()) << server.start_error().message();
+        ASSERT_TRUE(server.wait_until_ready());
+
+        auto stream = loop.run(TcpStream::connect(
+            context,
+            loop.get_scheduler(),
+            "127.0.0.1",
+            server.port()));
+        const auto observation = loop.run(run_close_completion_race(
+            stream,
+            loop.get_scheduler(),
+            start));
+
+        if (observation.completions_ != 1 ||
+            observation.logicError_ ||
+            observation.systemError_ ||
+            observation.unexpected_) {
+            ++invalid;
+        } else if (observation.cancelled_) {
+            ++cancelled;
+        } else if (observation.transferred_ == 1) {
+            ++completed;
+        } else {
+            ++invalid;
+        }
+
+        EXPECT_FALSE(stream.is_open());
+    }
+
+    EXPECT_EQ(completed + cancelled, RACE_COUNT);
+    EXPECT_EQ(invalid, 0);
+}
+
+TEST(CmpTcpTest, StopCompletionRaceChoosesOneOutcome) {
+    constexpr int RACE_COUNT { 100 };
+    std::barrier start { 2 };
+    std::binary_semaphore serverDone { 0 };
+    std::atomic<bool> serverSucceeded { true };
+    LoopbackServer server {
+        asio::ip::address_v4::loopback(),
+        [&](asio::ip::tcp::socket& socket) {
+            for (int iteration { 0 }; iteration < RACE_COUNT; ++iteration) {
+                start.arrive_and_wait();
+
+                if (serverSucceeded.load(std::memory_order_acquire)) {
+                    const std::array byte { std::byte { 0x2c } };
+                    std::error_code error {};
+                    asio::write(socket, asio::buffer(byte), error);
+
+                    if (error) {
+                        serverSucceeded.store(false, std::memory_order_release);
+                    }
+                }
+            }
+
+            serverDone.release();
+        }
+    };
+    ASSERT_TRUE(server.available()) << server.start_error().message();
+    ASSERT_TRUE(server.wait_until_ready());
+
+    IoContext context {};
+    RunLoop loop {};
+    auto stream = loop.run(TcpStream::connect(
+        context,
+        loop.get_scheduler(),
+        "127.0.0.1",
+        server.port()));
+    const auto counts = loop.run(run_stop_completion_races(
+        stream,
+        loop.get_scheduler(),
+        start,
+        RACE_COUNT));
+
+    ASSERT_TRUE(serverDone.try_acquire_for(2s));
+    EXPECT_TRUE(serverSucceeded.load(std::memory_order_acquire));
+    EXPECT_EQ(counts.completed_ + counts.cancelled_, RACE_COUNT);
+    EXPECT_EQ(counts.invalid_, 0);
+    EXPECT_TRUE(stream.is_open());
+}
+
+TEST(CmpTcpTest, ContextShutdownDrainsPendingReadAndClosesSurvivor) {
+    LoopbackServer server { asio::ip::address_v4::loopback() };
+    ASSERT_TRUE(server.available()) << server.start_error().message();
+    ASSERT_TRUE(server.wait_until_ready());
+
+    auto context = std::make_unique<IoContext>();
+    RunLoop loop {};
+    auto stream = loop.run(TcpStream::connect(
+        *context,
+        loop.get_scheduler(),
+        "127.0.0.1",
+        server.port()));
+    const auto observation = loop.run(destroy_context_with_pending_read(
+        context,
+        stream,
+        loop.get_scheduler()));
+    std::array<std::byte, 1> buffer {};
+
+    EXPECT_FALSE(context);
+    EXPECT_EQ(observation.completions_, 1);
+    EXPECT_TRUE(observation.cancelled_);
+    EXPECT_FALSE(observation.logicError_);
+    EXPECT_FALSE(observation.systemError_);
+    EXPECT_FALSE(observation.unexpected_);
+    EXPECT_EQ(observation.resumedThread_, std::this_thread::get_id());
+    EXPECT_FALSE(stream.is_open());
+    EXPECT_THROW(
+        loop.run(stream.read_some(loop.get_scheduler(), buffer)),
+        std::logic_error);
+    EXPECT_THROW(
+        loop.run(stream.write_all(loop.get_scheduler(), buffer)),
+        std::logic_error);
+    EXPECT_NO_THROW(stream.close());
 }
 
 }  // namespace

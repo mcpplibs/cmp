@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-30
 **Design:** `docs/superpowers/specs/2026-08-29-cmp-phase6b-tcp-client-v1-design.md`
-**Status:** In progress — connect gate complete
+**Status:** In progress — read/write gate complete
 **Baseline:** Local Phase 6A commit `701aa8b`, 116/116 Dev and Release tests
 
 ## Execution Rule
@@ -227,6 +227,31 @@ Add deterministic loopback tests for empty buffers, full write, partial read, se
 with all bytes observed before repeated EOF, simultaneous read/write, a rejected second read, and a
 rejected second write. To keep the second-write check deterministic, hold the first operation at a
 gated return Scheduler until the overlap result is observed.
+
+**Self-review — 2026-08-30:** Read terminal state is synchronized separately from the atomic
+logical-open flag: an error delivered with bytes is retained and observed once before later reads
+reject the closed stream, while EOF remains sticky without closing the write direction. A local
+cancellation that arrives with bytes returns those bytes and retains no cancellation error.
+Read/write admission uses one atomic flag per direction and is held through the return-Scheduler
+hop. The configured LLVM 22 libc++ `std` module does not provide C++23 `std::scope_exit`, so the
+helper releases explicitly on both schedule success and exception without adding a guard type.
+Context/resource validation precedes pre-cancellation and empty-buffer
+success; those immediate paths touch no socket. The existing bridge lifetime anchor retains the
+socket for native operations. Tests extend the one loopback fixture with small protocol callbacks;
+the read gate has a timeout only to break deadlocks, and the second-write case gates the first
+return hop behind an occupied one-worker `ThreadPool`.
+
+**Completion — 2026-08-30:** Added lazy non-coroutine `read_some()` and `write_all()` wrappers over
+the existing socket state and native bridge. One atomic admission flag per direction permits a
+read and write together while rejecting same-direction overlap through the requested return
+Scheduler. Reads support empty buffers, partial delivery, retained terminal errors, sticky EOF,
+and bytes-before-error; writes use Asio's composed `async_write()` and enforce all-or-error. The
+configured libc++ lacks `std::scope_exit`, so admission release is explicit on both return-schedule
+success and failure. The loopback fixture now accepts small synchronous protocols and enables
+`reuse_address` for repeated tests. Focused Dev/Release passed 15/15; both full suites passed
+131/131 across 10 binaries. Ten complete Release repetitions passed 150/150, and the two overlap
+tests passed 100/100 across 50 repetitions. An earlier 100-repeat probe stopped in iteration 25
+when this host's 301-port ephemeral range was exhausted; no CMP assertion or operation failed.
 
 ## 6. Implement cancellation, close, and shutdown races
 

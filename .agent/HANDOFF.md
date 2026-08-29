@@ -14,9 +14,9 @@ path-dependency consumer。
 
 ## 当前目标与状态
 
-Phase 6A blocking offload v1、Phase 6B 第 1–2 项与第 3 项分别作为本地提交 `701aa8b`、
-`816144f`、`76bb9bd` 完成，均尚未推送。Phase 6B Plan 第 4 项 numeric-address
-`TcpStream::connect()` 已实现并通过本地门禁；read/write 与公开 close API 尚未实现。
+Phase 6A blocking offload v1、Phase 6B 第 1–3 项与第 4 项分别作为本地提交 `701aa8b`、
+`816144f`、`76bb9bd`、`4f05767` 完成，均尚未推送。Phase 6B Plan 第 5 项 read/write、EOF 与
+overlap 已实现并通过本地门禁；公开 close/cancellation/shutdown 竞态尚未实现。
 
 ## 已完成工作
 
@@ -73,6 +73,18 @@ Phase 6A blocking offload v1、Phase 6B 第 1–2 项与第 3 项分别作为本
   后先经显式 return Scheduler 再发布 move-only stream，return Scheduler 失败由内部 RAII 关闭。
 - `tests/tcp_test.cpp` 扩展为单一同步 Asio loopback fixture，覆盖 laziness/临时地址所有权、IPv4、
   可用时 IPv6、拒绝连接、预取消、RunLoop/ThreadPool 亲和及 inactive/expired Scheduler。
+- 新增 lazy `read_some()` 与 `write_all()` 非协程包装器；buffer span、Scheduler、token 与 socket
+  state 均在调用时按值捕获，实际 buffer 仍按 API 契约借用到 Task 完成。
+- socket state 使用每方向一个 atomic admission flag，允许一读一写并行并拒绝同方向重叠；flag
+  保持到 return-Scheduler 跳转结束，跳转成功或失败均释放。
+- read 实现 empty、partial、bytes-before-error、一次 retained fatal error 与 sticky EOF；远端 EOF
+  不关闭写方向，后续整条流关闭又不会被旧 sticky EOF 掩盖。
+- write 使用 Asio `async_write()` 完成全 buffer；已发起 write 的取消或错误关闭 stream，成功计数
+  不等于 buffer 大小时视为内部不变量破坏。
+- 当前 libc++ `std` 模块不提供 C++23 `std::scope_exit`；按实测改为在 return-Scheduler 成功与
+  异常两条路径显式释放 admission，没有新增 guard abstraction 或依赖。
+- 同一 loopback fixture 增加小型同步 protocol callback、partial/EOF/duplex gate 与
+  `reuse_address`，没有增加 public server 或固定 sleep。
 
 ## 重要决策
 
@@ -154,6 +166,13 @@ Phase 6A blocking offload v1、Phase 6B 第 1–2 项与第 3 项分别作为本
   800/800 用例通过。
 - 加入 connect 后，Dev 与 Release 的 strict cache-off 全量测试均为 10 个二进制、124/124 通过。
   当前未重复执行 example 或 benchmark；它们保留到 Phase 6B 完整 API 与 readiness 迁移门禁。
+- read/write 定向 `tcp_test` 在 Dev 与 Release 均为 15/15 通过；Release 整套重复 10 轮为
+  150/150，通过两个 overlap test 重复 50 轮为 100/100。
+- 加入 read/write 后，Dev 与 Release 的 strict cache-off 全量测试均为 10 个二进制、131/131
+  通过。
+- 曾尝试 Release 整套重复 100 轮；前 24 轮 360/360 通过，第 25 轮因本机临时端口范围仅
+  `60700–61000` 而出现 `Address already in use`。fixture 随后增加 `reuse_address`，上述 10 轮
+  整套与 50 轮 overlap 复验通过；该次资源耗尽不计为功能通过，也未隐藏。
 
 ## 已知问题 / 风险
 
@@ -166,21 +185,20 @@ Phase 6A blocking offload v1、Phase 6B 第 1–2 项与第 3 项分别作为本
 - 三平台兼容性仍需远程 CI 确认。
 - `chriskohlhoff.asio@1.38.1` 只在本机 Linux/WSL2 + LLVM 22.1.8 完成模块编译；macOS 与
   Windows 仍需后续远程 CI 验证。
-- Phase 6B 当前已有 backend、`IoContext` 生命周期、native-completion bridge 与 `connect()`；
-  pending connect 的主动取消竞态、read/write、公开 close、shutdown 竞态和 benchmark 迁移仍待
-  后续步骤完成。
+- Phase 6B 当前已有 backend、`IoContext`、native bridge、connect/read/write 与 EOF/overlap；
+  pending operation 主动取消、公开 close/is_open、shutdown 竞态和 benchmark 迁移仍待后续步骤。
 - 单 I/O driver 是 v1 的刻意简化；只有 benchmark 证明它是瓶颈后才设计多 driver/strand。
 
 ## 剩余工作
 
-1. 按 Phase 6B Plan 第 5 项实现 `read_some()`、`write_all()`、EOF/partial transfer 与单读单写
-   admission，并扩展同一个 loopback fixture 的确定性协议门禁。
+1. 按 Phase 6B Plan 第 6 项实现公开 `close()`/`is_open()`，补齐 stop/close/context shutdown
+   cancellation provenance 与 exactly-once race tests。
 2. 完成本地 Dev/Release、race、example 与五轮 readiness 验证后，再等待远程三平台 CI 所需
    的单独授权。
-3. Phase 6B 第 3 项已本地提交为 `76bb9bd`；当前 connect、测试、Plan 与 HANDOFF 尚未提交。
+3. Phase 6B 第 4 项已本地提交为 `4f05767`；当前 read/write、测试、Plan 与 HANDOFF 尚未提交。
    Push、PR 或 CI 均需对应明确授权。
 
 ## 推荐下一步
 
-按 `2026-08-30-cmp-phase6b-tcp-client-v1.md` 开始第 5 项，在现有 socket state 与 loopback
-fixture 上实现 read/write、EOF、partial transfer 和同方向 overlap 门禁，不提前扩展范围。
+按 `2026-08-30-cmp-phase6b-tcp-client-v1.md` 开始第 6 项，在现有 state/bridge 上补齐公开
+close/is_open、取消来源与 stop/close/shutdown exactly-once 竞态，不引入 timeout 或队列。

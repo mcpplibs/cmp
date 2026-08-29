@@ -26,6 +26,14 @@ private:
     friend class TcpSocketState;
 
 public:
+    void ensure_accepting() {
+        const std::lock_guard lock { admissionMutex_ };
+
+        if (!accepting_) {
+            throw std::logic_error { "I/O context is stopping" };
+        }
+    }
+
     template<typename Handler>
     void post(Handler&& handler) {
         const std::lock_guard lock { admissionMutex_ };
@@ -67,6 +75,10 @@ private:
     std::weak_ptr<IoContextState> context_ {};
     std::optional<asio::ip::tcp::socket> socket_ {};
     std::atomic<bool> logicallyOpen_ { false };
+    std::atomic<bool> readPending_ { false };
+    std::atomic<bool> writePending_ { false };
+    std::mutex readTerminalMutex_ {};
+    std::optional<std::error_code> readTerminal_ {};
 
 public:
     explicit TcpSocketState(
@@ -74,9 +86,9 @@ public:
         : context_ { context },
           socket_ { std::in_place, context->ioContext_ } {}
 
-    [[nodiscard]] asio::ip::tcp::socket& socket_on_driver() noexcept {
+    [[nodiscard]] asio::ip::tcp::socket& socket_on_driver() {
         if (!socket_) {
-            std::terminate();
+            throw std::logic_error { "TCP stream is closed" };
         }
 
         return *socket_;
@@ -88,6 +100,86 @@ public:
                 std::memory_order_release)) {
             std::terminate();
         }
+    }
+
+    [[nodiscard]] std::shared_ptr<IoContextState> lock_context() const {
+        const auto context = context_.lock();
+
+        if (!context) {
+            throw std::logic_error { "I/O context no longer exists" };
+        }
+
+        return context;
+    }
+
+    void require_open() const {
+        if (!logicallyOpen_.load(std::memory_order_acquire)) {
+            throw std::logic_error { "TCP stream is closed" };
+        }
+    }
+
+    [[nodiscard]] bool read_available() {
+        const std::lock_guard lock { readTerminalMutex_ };
+
+        if (logicallyOpen_.load(std::memory_order_acquire)) {
+            return true;
+        }
+
+        // fatal read 与字节同时完成时，关闭后仍需交付一次 retained error。
+        return readTerminal_ && *readTerminal_ != asio::error::eof;
+    }
+
+    [[nodiscard]] bool try_begin_read() noexcept {
+        bool expected { false };
+        return readPending_.compare_exchange_strong(
+            expected,
+            true,
+            std::memory_order_acq_rel);
+    }
+
+    void finish_read() noexcept {
+        if (!readPending_.exchange(false, std::memory_order_release)) {
+            std::terminate();
+        }
+    }
+
+    [[nodiscard]] bool try_begin_write() noexcept {
+        bool expected { false };
+        return writePending_.compare_exchange_strong(
+            expected,
+            true,
+            std::memory_order_acq_rel);
+    }
+
+    void finish_write() noexcept {
+        if (!writePending_.exchange(false, std::memory_order_release)) {
+            std::terminate();
+        }
+    }
+
+    [[nodiscard]] std::optional<std::error_code> take_read_terminal() {
+        const std::lock_guard lock { readTerminalMutex_ };
+        const auto terminal = readTerminal_;
+
+        if (terminal && *terminal != asio::error::eof) {
+            readTerminal_.reset();
+        }
+
+        return terminal;
+    }
+
+    void retain_read_terminal(std::error_code error) {
+        if (!error) {
+            std::terminate();
+        }
+
+        const std::lock_guard lock { readTerminalMutex_ };
+
+        if (readTerminal_) {
+            std::terminate();
+        }
+
+        readTerminal_ = error;
     }
 
     void close_on_driver() noexcept {
@@ -415,6 +507,20 @@ private:
         std::uint16_t port,
         std::stop_token stopToken);
 
+    template<typename ReturnScheduler>
+    [[nodiscard]] static Task<std::size_t> read_some_impl_(
+        std::shared_ptr<detail::TcpSocketState> state,
+        ReturnScheduler returnTo,
+        std::span<std::byte> buffer,
+        std::stop_token stopToken);
+
+    template<typename ReturnScheduler>
+    [[nodiscard]] static Task<void> write_all_impl_(
+        std::shared_ptr<detail::TcpSocketState> state,
+        ReturnScheduler returnTo,
+        std::span<const std::byte> buffer,
+        std::stop_token stopToken);
+
 public:
     TcpStream() = delete;
     TcpStream(const TcpStream&) = delete;
@@ -443,6 +549,30 @@ public:
         ReturnScheduler returnTo,
         std::string_view numericAddress,
         std::uint16_t port,
+        std::stop_token stopToken = {});
+
+    template<typename ReturnScheduler>
+    requires (
+        std::move_constructible<ReturnScheduler> &&
+        requires(const ReturnScheduler& scheduler) {
+            scheduler.schedule();
+        }
+    )
+    [[nodiscard]] Task<std::size_t> read_some(
+        ReturnScheduler returnTo,
+        std::span<std::byte> buffer,
+        std::stop_token stopToken = {});
+
+    template<typename ReturnScheduler>
+    requires (
+        std::move_constructible<ReturnScheduler> &&
+        requires(const ReturnScheduler& scheduler) {
+            scheduler.schedule();
+        }
+    )
+    [[nodiscard]] Task<void> write_all(
+        ReturnScheduler returnTo,
+        std::span<const std::byte> buffer,
         std::stop_token stopToken = {});
 };
 
@@ -532,6 +662,202 @@ Task<TcpStream> TcpStream::connect_impl_(
 }
 
 template<typename ReturnScheduler>
+Task<std::size_t> TcpStream::read_some_impl_(
+    std::shared_ptr<detail::TcpSocketState> state,
+    ReturnScheduler returnTo,
+    std::span<std::byte> buffer,
+    std::stop_token stopToken) {
+    std::optional<std::size_t> transferred {};
+    std::exception_ptr exception {};
+    bool admitted { false };
+    const auto releaseAdmission = [&] noexcept {
+        if (std::exchange(admitted, false)) {
+            state->finish_read();
+        }
+    };
+
+    try {
+        if (!state) {
+            throw std::logic_error { "TCP stream was moved from" };
+        }
+
+        const auto context = state->lock_context();
+        context->ensure_accepting();
+
+        if (!state->read_available()) {
+            throw std::logic_error { "TCP stream is closed" };
+        }
+
+        if (!state->try_begin_read()) {
+            throw std::logic_error { "TCP stream already has a pending read" };
+        }
+
+        admitted = true;
+
+        if (const auto terminal = state->take_read_terminal()) {
+            if (*terminal == asio::error::eof) {
+                transferred = 0;
+            } else {
+                throw std::system_error { *terminal };
+            }
+        } else {
+            state->require_open();
+
+            if (stopToken.stop_requested()) {
+                throw OperationCancelled {};
+            }
+
+            if (buffer.empty()) {
+                transferred = 0;
+            } else {
+                const auto native = co_await detail::NativeOperationAwaiter {
+                    context,
+                    stopToken,
+                    state,
+                    [state, buffer](auto completion) mutable {
+                        state->socket_on_driver().async_read_some(
+                            asio::buffer(
+                                buffer.data(),
+                                buffer.size_bytes()),
+                            std::move(completion));
+                    }
+                };
+
+                if (native.transferred_ > buffer.size_bytes()) {
+                    std::terminate();
+                }
+
+                if (!native.error_) {
+                    transferred = native.transferred_;
+
+                    if (native.transferred_ == 0) {
+                        state->retain_read_terminal(asio::error::eof);
+                    }
+                } else if (native.transferred_ > 0) {
+                    transferred = native.transferred_;
+
+                    if (native.error_ == asio::error::eof) {
+                        state->retain_read_terminal(native.error_);
+                    } else if (native.cancellation_ ==
+                        detail::NativeCancellationOrigin::none) {
+                        state->retain_read_terminal(native.error_);
+                        state->close_on_driver();
+                    }
+                } else if (native.cancellation_ !=
+                    detail::NativeCancellationOrigin::none) {
+                    throw OperationCancelled {};
+                } else if (native.error_ == asio::error::eof) {
+                    state->retain_read_terminal(native.error_);
+                    transferred = 0;
+                } else {
+                    state->close_on_driver();
+                    throw std::system_error { native.error_ };
+                }
+            }
+        }
+    } catch (...) {
+        exception = std::current_exception();
+    }
+
+    try {
+        co_await returnTo.schedule();
+    } catch (...) {
+        releaseAdmission();
+        throw;
+    }
+
+    releaseAdmission();
+
+    if (exception) {
+        std::rethrow_exception(exception);
+    }
+
+    co_return *transferred;
+}
+
+template<typename ReturnScheduler>
+Task<void> TcpStream::write_all_impl_(
+    std::shared_ptr<detail::TcpSocketState> state,
+    ReturnScheduler returnTo,
+    std::span<const std::byte> buffer,
+    std::stop_token stopToken) {
+    std::exception_ptr exception {};
+    bool admitted { false };
+    const auto releaseAdmission = [&] noexcept {
+        if (std::exchange(admitted, false)) {
+            state->finish_write();
+        }
+    };
+
+    try {
+        if (!state) {
+            throw std::logic_error { "TCP stream was moved from" };
+        }
+
+        const auto context = state->lock_context();
+        context->ensure_accepting();
+        state->require_open();
+
+        if (!state->try_begin_write()) {
+            throw std::logic_error { "TCP stream already has a pending write" };
+        }
+
+        admitted = true;
+
+        if (stopToken.stop_requested()) {
+            throw OperationCancelled {};
+        }
+
+        if (!buffer.empty()) {
+            const auto native = co_await detail::NativeOperationAwaiter {
+                context,
+                stopToken,
+                state,
+                [state, buffer](auto completion) mutable {
+                    asio::async_write(
+                        state->socket_on_driver(),
+                        asio::buffer(
+                            buffer.data(),
+                            buffer.size_bytes()),
+                        std::move(completion));
+                }
+            };
+
+            if (native.error_) {
+                state->close_on_driver();
+
+                if (native.cancellation_ !=
+                    detail::NativeCancellationOrigin::none) {
+                    throw OperationCancelled {};
+                }
+
+                throw std::system_error { native.error_ };
+            }
+
+            if (native.transferred_ != buffer.size_bytes()) {
+                state->close_on_driver();
+                std::terminate();
+            }
+        }
+    } catch (...) {
+        exception = std::current_exception();
+    }
+
+    try {
+        co_await returnTo.schedule();
+    } catch (...) {
+        releaseAdmission();
+        throw;
+    }
+
+    releaseAdmission();
+
+    if (exception) {
+        std::rethrow_exception(exception);
+    }
+}
+
+template<typename ReturnScheduler>
 requires (
     std::move_constructible<ReturnScheduler> &&
     requires(const ReturnScheduler& scheduler) {
@@ -549,6 +875,42 @@ Task<TcpStream> TcpStream::connect(
         std::move(returnTo),
         std::string { numericAddress },
         port,
+        std::move(stopToken));
+}
+
+template<typename ReturnScheduler>
+requires (
+    std::move_constructible<ReturnScheduler> &&
+    requires(const ReturnScheduler& scheduler) {
+        scheduler.schedule();
+    }
+)
+Task<std::size_t> TcpStream::read_some(
+    ReturnScheduler returnTo,
+    std::span<std::byte> buffer,
+    std::stop_token stopToken) {
+    return read_some_impl_(
+        state_,
+        std::move(returnTo),
+        buffer,
+        std::move(stopToken));
+}
+
+template<typename ReturnScheduler>
+requires (
+    std::move_constructible<ReturnScheduler> &&
+    requires(const ReturnScheduler& scheduler) {
+        scheduler.schedule();
+    }
+)
+Task<void> TcpStream::write_all(
+    ReturnScheduler returnTo,
+    std::span<const std::byte> buffer,
+    std::stop_token stopToken) {
+    return write_all_impl_(
+        state_,
+        std::move(returnTo),
+        buffer,
         std::move(stopToken));
 }
 

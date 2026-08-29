@@ -66,6 +66,7 @@ class TcpSocketState final {
 private:
     std::weak_ptr<IoContextState> context_ {};
     std::optional<asio::ip::tcp::socket> socket_ {};
+    std::atomic<bool> logicallyOpen_ { false };
 
 public:
     explicit TcpSocketState(
@@ -73,7 +74,25 @@ public:
         : context_ { context },
           socket_ { std::in_place, context->ioContext_ } {}
 
+    [[nodiscard]] asio::ip::tcp::socket& socket_on_driver() noexcept {
+        if (!socket_) {
+            std::terminate();
+        }
+
+        return *socket_;
+    }
+
+    void mark_open_on_driver() noexcept {
+        if (!socket_ || logicallyOpen_.exchange(
+                true,
+                std::memory_order_release)) {
+            std::terminate();
+        }
+    }
+
     void close_on_driver() noexcept {
+        logicallyOpen_.store(false, std::memory_order_release);
+
         if (!socket_) {
             return;
         }
@@ -81,6 +100,29 @@ public:
         std::error_code ignored {};
         socket_->close(ignored);
         socket_.reset();
+    }
+
+    void request_close(
+        const std::shared_ptr<TcpSocketState>& self) noexcept {
+        if (!logicallyOpen_.exchange(false, std::memory_order_acq_rel)) {
+            return;
+        }
+
+        const auto context = context_.lock();
+
+        if (!context) {
+            return;
+        }
+
+        try {
+            context->post([self] noexcept {
+                self->close_on_driver();
+            });
+        } catch (const std::logic_error&) {
+            // Shutdown 已接管 registry 中的 socket。
+        } catch (...) {
+            std::terminate();
+        }
     }
 };
 
@@ -139,6 +181,8 @@ struct NativeOperationState final {
     };
     std::exception_ptr exception_ {};
     bool completed_ { false };
+    // 保证 native handler 返回前，connect/read/write 使用的资源仍然有效。
+    std::shared_ptr<void> lifetime_ {};
     // 最先释放，避免停止回调继续访问即将销毁的 operation state。
     std::optional<StopCallback> stopCallback_ {};
 
@@ -248,10 +292,13 @@ public:
     NativeOperationAwaiter(
         std::shared_ptr<IoContextState> context,
         std::stop_token stopToken,
+        std::shared_ptr<void> lifetime,
         Initiation initiation)
         : context_ { std::move(context) },
           stopToken_ { std::move(stopToken) },
-          initiation_ { std::move(initiation) } {}
+          initiation_ { std::move(initiation) } {
+        operation_->lifetime_ = std::move(lifetime);
+    }
 
     [[nodiscard]] constexpr bool await_ready() const noexcept {
         return false;
@@ -300,9 +347,8 @@ public:
     }
 };
 
-struct NativeBridgeCompileProbe final {
-    template<typename Completion>
-    void operator()(Completion&&) const noexcept {}
+struct ConnectOperationState final {
+    std::shared_ptr<TcpSocketState> socket_ {};
 };
 
 static_assert(std::invocable<
@@ -317,12 +363,11 @@ static_assert(std::is_nothrow_constructible_v<
     std::stop_token,
     NativeOperationState::StopRequest>);
 
-// Step 4 接入真实 socket initiation 后删除此编译门禁。
-template class NativeOperationAwaiter<NativeBridgeCompileProbe>;
-
 }  // namespace mcpplibs::cmp::detail
 
 export namespace mcpplibs::cmp {
+
+class TcpStream;
 
 class IoContext final {
 private:
@@ -333,6 +378,8 @@ private:
     std::jthread driver_ { [state = state_] {
         state->run_driver();
     } };
+
+    friend class TcpStream;
 
 public:
     IoContext() = default;
@@ -351,5 +398,158 @@ public:
         driver_.join();
     }
 };
+
+class TcpStream final {
+private:
+    std::shared_ptr<detail::TcpSocketState> state_ {};
+
+    explicit TcpStream(
+        std::shared_ptr<detail::TcpSocketState> state) noexcept
+        : state_ { std::move(state) } {}
+
+    template<typename ReturnScheduler>
+    [[nodiscard]] static Task<TcpStream> connect_impl_(
+        std::weak_ptr<detail::IoContextState> context,
+        ReturnScheduler returnTo,
+        std::string numericAddress,
+        std::uint16_t port,
+        std::stop_token stopToken);
+
+public:
+    TcpStream() = delete;
+    TcpStream(const TcpStream&) = delete;
+    TcpStream& operator=(const TcpStream&) = delete;
+
+    TcpStream(TcpStream&& other) noexcept
+        : state_ { std::exchange(other.state_, {}) } {}
+
+    TcpStream& operator=(TcpStream&&) = delete;
+
+    ~TcpStream() {
+        if (state_) {
+            state_->request_close(state_);
+        }
+    }
+
+    template<typename ReturnScheduler>
+    requires (
+        std::move_constructible<ReturnScheduler> &&
+        requires(const ReturnScheduler& scheduler) {
+            scheduler.schedule();
+        }
+    )
+    [[nodiscard]] static Task<TcpStream> connect(
+        IoContext& context,
+        ReturnScheduler returnTo,
+        std::string_view numericAddress,
+        std::uint16_t port,
+        std::stop_token stopToken = {});
+};
+
+template<typename ReturnScheduler>
+Task<TcpStream> TcpStream::connect_impl_(
+    std::weak_ptr<detail::IoContextState> weakContext,
+    ReturnScheduler returnTo,
+    std::string numericAddress,
+    std::uint16_t port,
+    std::stop_token stopToken) {
+    auto connectState = std::make_shared<detail::ConnectOperationState>();
+    std::optional<TcpStream> stream {};
+    std::exception_ptr exception {};
+
+    try {
+        const auto context = weakContext.lock();
+
+        if (!context) {
+            throw std::logic_error { "I/O context no longer exists" };
+        }
+
+        const auto result = co_await detail::NativeOperationAwaiter {
+            context,
+            stopToken,
+            connectState,
+            [
+                context,
+                connectState,
+                numericAddress = std::move(numericAddress),
+                port,
+                stopToken
+            ](auto completion) mutable {
+                if (stopToken.stop_requested()) {
+                    throw OperationCancelled {};
+                }
+
+                std::error_code error {};
+                const auto address = asio::ip::make_address(
+                    numericAddress,
+                    error);
+
+                if (error) {
+                    throw std::system_error { error };
+                }
+
+                auto socket = std::make_shared<detail::TcpSocketState>(
+                    context);
+                connectState->socket_ = socket;
+                context->register_socket_on_driver(socket);
+                socket->socket_on_driver().async_connect(
+                    asio::ip::tcp::endpoint { address, port },
+                    std::move(completion));
+            }
+        };
+
+        if (result.error_) {
+            if (result.cancellation_ !=
+                detail::NativeCancellationOrigin::none) {
+                throw OperationCancelled {};
+            }
+
+            throw std::system_error { result.error_ };
+        }
+
+        if (!connectState->socket_) {
+            std::terminate();
+        }
+
+        connectState->socket_->mark_open_on_driver();
+        stream.emplace(TcpStream { connectState->socket_ });
+    } catch (...) {
+        if (connectState->socket_) {
+            connectState->socket_->close_on_driver();
+        }
+
+        exception = std::current_exception();
+    }
+
+    // 返回路径不接受取消，保证成功与错误都回到调用者选择的 Scheduler。
+    co_await returnTo.schedule();
+
+    if (exception) {
+        std::rethrow_exception(exception);
+    }
+
+    co_return std::move(*stream);
+}
+
+template<typename ReturnScheduler>
+requires (
+    std::move_constructible<ReturnScheduler> &&
+    requires(const ReturnScheduler& scheduler) {
+        scheduler.schedule();
+    }
+)
+Task<TcpStream> TcpStream::connect(
+    IoContext& context,
+    ReturnScheduler returnTo,
+    std::string_view numericAddress,
+    std::uint16_t port,
+    std::stop_token stopToken) {
+    return connect_impl_(
+        context.state_,
+        std::move(returnTo),
+        std::string { numericAddress },
+        port,
+        std::move(stopToken));
+}
 
 }  // namespace mcpplibs::cmp

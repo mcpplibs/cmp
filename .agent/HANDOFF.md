@@ -14,9 +14,9 @@ path-dependency consumer。
 
 ## 当前目标与状态
 
-Phase 6A blocking offload v1 与 Phase 6B 第 1–2 项分别作为本地提交 `701aa8b`、`816144f`
-完成，均尚未推送。Phase 6B Plan 第 3 项私有 native-completion bridge 已实现并通过编译门禁；
-尚未实现 `TcpStream` 公共 API 或真实 socket operation。
+Phase 6A blocking offload v1、Phase 6B 第 1–2 项与第 3 项分别作为本地提交 `701aa8b`、
+`816144f`、`76bb9bd` 完成，均尚未推送。Phase 6B Plan 第 4 项 numeric-address
+`TcpStream::connect()` 已实现并通过本地门禁；read/write 与公开 close API 尚未实现。
 
 ## 已完成工作
 
@@ -63,8 +63,16 @@ Phase 6A blocking offload v1 与 Phase 6B 第 1–2 项分别作为本地提交 
 - stop callback 只持有 operation/context 弱引用，并把 stop-token cancellation 排到 I/O 线程
   后再记录来源、发出 `cancellation_type::all`；context 已停止接纳时由 shutdown close 路径
   完成 operation。
-- 加入内部具体模板实例作为 Step 3 编译门禁，真实 connect initiation 在 Step 4 接入后删除；
-  没有为私有 bridge 暴露测试 API 或提前加入公共 `TcpStream`。
+- Step 3 曾加入内部具体模板实例作为 bridge 编译门禁，Step 4 接入真实 connect initiation 后已
+  删除；没有为私有 bridge 暴露测试 API。
+- 新增不可默认构造、不可复制、可 `noexcept` 移动构造且不可移动赋值的 `TcpStream`；公开
+  `connect()` 是非协程包装器，在返回 lazy Task 前复制地址、Scheduler、token 与 context 弱句柄。
+- `connect()` 被 context 接纳后才在 I/O 线程检查预取消、解析 numeric IPv4/IPv6、创建并注册
+  socket、发起 `async_connect()`；预取消不解析地址或打开 socket，系统错误保留原 error code。
+- native operation state 新增私有生命周期锚点，保证临时 connect socket 存活到 handler；成功
+  后先经显式 return Scheduler 再发布 move-only stream，return Scheduler 失败由内部 RAII 关闭。
+- `tests/tcp_test.cpp` 扩展为单一同步 Asio loopback fixture，覆盖 laziness/临时地址所有权、IPv4、
+  可用时 IPv6、拒绝连接、预取消、RunLoop/ThreadPool 亲和及 inactive/expired Scheduler。
 
 ## 重要决策
 
@@ -142,9 +150,10 @@ Phase 6A blocking offload v1 与 Phase 6B 第 1–2 项分别作为本地提交 
 - 加入 native bridge 后，`mcpp build --profile dev --strict --cache=off` 与
   `mcpp build --profile release --strict --cache=off` 均通过；Dev 与 Release 全量测试均为 10 个
   二进制、117/117 通过。
-- 当前 bridge 没有公共 socket operation，因而尚无真实 completion/cancellation runtime test；
-  该门禁在 Step 4 的 loopback connect 测试完成。当前未重复执行 example 或 benchmark，既有
-  Phase 6A 结果不代表 TCP API 已实现。
+- connect 定向 `tcp_test` 在 Dev 与 Release 均为 8/8 通过；Release binary 重复执行 100 轮，
+  800/800 用例通过。
+- 加入 connect 后，Dev 与 Release 的 strict cache-off 全量测试均为 10 个二进制、124/124 通过。
+  当前未重复执行 example 或 benchmark；它们保留到 Phase 6B 完整 API 与 readiness 迁移门禁。
 
 ## 已知问题 / 风险
 
@@ -157,21 +166,21 @@ Phase 6A blocking offload v1 与 Phase 6B 第 1–2 项分别作为本地提交 
 - 三平台兼容性仍需远程 CI 确认。
 - `chriskohlhoff.asio@1.38.1` 只在本机 Linux/WSL2 + LLVM 22.1.8 完成模块编译；macOS 与
   Windows 仍需后续远程 CI 验证。
-- Phase 6B 当前已有 backend、`IoContext` 生命周期和私有 native-completion bridge；bridge 的
-  runtime exactly-once/cancellation 尚待真实 socket 测试，`TcpStream` connect/read/write、
-  close 竞态和 benchmark 迁移均尚未实现。
+- Phase 6B 当前已有 backend、`IoContext` 生命周期、native-completion bridge 与 `connect()`；
+  pending connect 的主动取消竞态、read/write、公开 close、shutdown 竞态和 benchmark 迁移仍待
+  后续步骤完成。
 - 单 I/O driver 是 v1 的刻意简化；只有 benchmark 证明它是瓶颈后才设计多 driver/strand。
 
 ## 剩余工作
 
-1. 按 Phase 6B Plan 第 4 项实现 `TcpStream::connect()` 和同步 Asio loopback fixture，删除内部
-   bridge 编译 probe，并以真实 connect 锁定 laziness、地址复制、错误、取消和返回线程亲和。
+1. 按 Phase 6B Plan 第 5 项实现 `read_some()`、`write_all()`、EOF/partial transfer 与单读单写
+   admission，并扩展同一个 loopback fixture 的确定性协议门禁。
 2. 完成本地 Dev/Release、race、example 与五轮 readiness 验证后，再等待远程三平台 CI 所需
    的单独授权。
-3. Phase 6B 第 1–2 项已本地提交为 `816144f`；当前 bridge、Plan 与 HANDOFF 尚未提交。Push、
-   PR 或 CI 均需对应明确授权。
+3. Phase 6B 第 3 项已本地提交为 `76bb9bd`；当前 connect、测试、Plan 与 HANDOFF 尚未提交。
+   Push、PR 或 CI 均需对应明确授权。
 
 ## 推荐下一步
 
-按 `2026-08-30-cmp-phase6b-tcp-client-v1.md` 开始第 4 项，实现 numeric-address
-`TcpStream::connect()` 与单一同步 Asio loopback fixture，并用真实 operation 验证 bridge。
+按 `2026-08-30-cmp-phase6b-tcp-client-v1.md` 开始第 5 项，在现有 socket state 与 loopback
+fixture 上实现 read/write、EOF、partial transfer 和同方向 overlap 门禁，不提前扩展范围。

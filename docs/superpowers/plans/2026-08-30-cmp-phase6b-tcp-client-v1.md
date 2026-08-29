@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-30
 **Design:** `docs/superpowers/specs/2026-08-29-cmp-phase6b-tcp-client-v1-design.md`
-**Status:** In progress — native-completion bridge gate complete
+**Status:** In progress — connect gate complete
 **Baseline:** Local Phase 6A commit `701aa8b`, 116/116 Dev and Release tests
 
 ## Execution Rule
@@ -176,6 +176,25 @@ Lock connect behavior with focused tests for:
 
 Use timeouts only as deadlock guards. Do not use elapsed time or platform-specific error numbers as
 pass conditions.
+
+**Self-review — 2026-08-30:** The public wrapper must copy the address and weak context handle
+before returning the lazy Task. A pre-stopped token is checked only after the context accepts the
+I/O-thread initiation, preserving resource-error precedence while still skipping parse/open. The
+bridge operation state gains one private lifetime anchor so the temporary socket survives through
+its native handler. Invalid return-Scheduler tests connect successfully first and exercise the
+post-connect cleanup path. Step 4 adds only this internal destruction path;
+public `close()` and `is_open()` remain Step 6 work.
+
+**Completion — 2026-08-30:** Added move-only `TcpStream` and its lazy numeric-address `connect()`.
+The wrapper owns the address and a weak context handle before returning; accepted initiation checks
+pre-cancellation, parses, creates/registers the socket, and calls `async_connect()` only on the I/O
+thread. The bridge now retains an operation-specific lifetime anchor. Success, cancellation, parse
+errors, connect errors, and context admission failures all attempt the explicit return-Scheduler
+hop before publishing. Internal destruction closes an undelivered connected socket without
+exposing Step 6 APIs early. The single synchronous loopback fixture covers IPv4, capability-gated
+IPv6, laziness/address ownership, refusal, pre-cancellation, RunLoop/ThreadPool affinity, and
+invalid return schedulers. Focused Dev and Release tests passed 8/8; the Release binary passed 100
+repetitions, and both full suites passed 124/124 across 10 binaries.
 
 ## 5. Implement read, write, EOF, and overlap
 

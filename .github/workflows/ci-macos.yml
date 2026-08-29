@@ -19,7 +19,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  XLINGS_VERSION: v2026.8.11.2
+  # Keep aligned with the Linux cold-cache floor.
+  XLINGS_VERSION: v2026.8.27.5
   XLINGS_NON_INTERACTIVE: '1'
 
 jobs:

@@ -21,8 +21,9 @@ concurrency:
 
 env:
   # Both installers read this: the shell one takes it as an argument or an env
-  # var, the PowerShell one defaults its -Version parameter to it.
-  XLINGS_VERSION: v2026.8.11.2
+  # var, the PowerShell one defaults its -Version parameter to it. Keep this
+  # aligned with the Linux cold-cache floor.
+  XLINGS_VERSION: v2026.8.27.5
   XLINGS_NON_INTERACTIVE: '1'
 
 jobs:

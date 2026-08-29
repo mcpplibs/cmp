@@ -9,6 +9,7 @@
 [English](README.md) · [简体中文](README.zh.md) · **繁體中文**
 
 [mcpp](https://github.com/mcpp-community/mcpp) · [架構](docs/architecture.zh.hant.md) ·
+[v1 可開發性壓測](docs/benchmarks/2026-08-29-cmp-v1-readiness.md) ·
 [Issues](https://github.com/mcpplibs/cmp/issues)
 
 [![ci-linux](https://github.com/mcpplibs/cmp/actions/workflows/ci-linux.yml/badge.svg?branch=main)](https://github.com/mcpplibs/cmp/actions/workflows/ci-linux.yml)
@@ -17,9 +18,10 @@
 
 > [!IMPORTANT]
 > CMP 已提供延遲啟動、單一消費者的 `Task<T>` / `Task<void>`、支援變參和 vector 的結構化
-> `when_all()`、eager 結構化 `TaskGroup`、單向 `OneShotEvent`、RAII `AsyncMutex`，以及在呼叫
-> 執行緒運行、支援明確排程和單調時鐘定時排程的 `RunLoop`。定時等待和 TaskGroup 子任務可明確使用基於
-> `std::stop_token` 的協作式取消；非同步 I/O 和 detached 執行尚未實作。
+> `when_all()`、eager 結構化 `TaskGroup`、一次性與可複用事件、RAII `AsyncMutex`，以及在呼叫
+> 執行緒運行、支援明確排程和單調時鐘定時排程的 `RunLoop`。就緒排程、定時等待、可複用事件
+> 等待和 TaskGroup 子任務可明確使用基於 `std::stop_token` 的協作式取消；非同步 I/O 和
+> detached 執行尚未實作。
 
 CMP 計畫以標準無堆疊 C++ 協程建構現代協程執行期與函式庫。明確的 `co_await` 模型現已
 涵蓋固定與增量結構化並行、一次性事件通知、排程、單調時鐘計時器和可取消定時等待，並將
@@ -70,10 +72,10 @@ cd examples/basic
 mcpp run
 ```
 
-範例會印出 `Coroutine result: 42`，匯合兩個定時 Task 後印出 `Concurrent result: 42`，
-eager 啟動兩個作用域 Task 後印出 `Task group result: 42`，等待一次性通知後印出
-`Event signalled`，執行兩個受保護 Task 後印出 `Mutex result: 42`，最後從預先取消的定時等待
-印出 `Coroutine cancelled`；所有輸出都在 `Task<void>` 協程內部。
+範例會印出 `Coroutine result: 42`、`Concurrent result: 42`、`Task group result: 42` 和
+`Recursive group result: 3`，接著透過 `Event signalled` 與 `Reusable event cycles: 2`
+展示一次性及可複用通知，再印出 `Mutex result: 42` 和 `Coroutine cancelled`；所有輸出都在
+`Task<void>` 協程內部。
 
 ## 目前 API
 
@@ -212,14 +214,20 @@ continuation 之間直接轉移，並透過 RAII 銷毀未消費的協程框架�
 作為 `std::vector<Task<T>>` 傳入，並依相同索引順序回傳結果 vector；具名輸入 vector 同樣
 必須移動。
 
-`TaskGroup::spawn()` 接管一個 `Task<void>` 並立即啟動它。等待僅能使用一次的 `join()` 會關閉
-接納，等待所有已接納子任務，再依接納順序重新拋出第一個例外。TaskGroup 必須在解構前完成
-join。`get_stop_token()` 和 `request_stop()` 提供一個明確的標準取消通道；token 不會自動
-注入，開發者需要將它傳給支援取消的子任務。需要傳回子任務結果時應使用 `when_all()`。
+`TaskGroup::spawn()` 接管一個 `Task<void>` 並立即啟動它。僅能使用一次的 `join()` 會等待 group
+到達靜止點；join 等待期間，仍在執行的子任務可以遞迴增加工作。活動計數歸零時接納永久關閉。
+TaskGroup 必須在解構前完成 join。`get_stop_token()` 和 `request_stop()` 提供明確的標準取消
+通道，`cancel_and_join()` 會先要求該通道再 join。token 不會自動注入。需要傳回子任務結果時
+應使用 `when_all()`。
 
 在未 set 的 `OneShotEvent` 上執行 `co_await event` 會無分配地暫停。第一次執行緒安全的 `set()`
 會永久設定事件，並在 setter 執行緒恰好恢復每個已註冊等待者一次；後續等待 inline 繼續，後續
 set 不做任何事。事件不可移動且必須比等待者活得更久；v1 不提供 reset 或隱式 Scheduler 轉移。
+
+`AsyncManualResetEvent` 提供可複用的 `set()` / `reset()` 週期。`wait(stop_token)` 支援協作式
+取消，pending 等待者依 FIFO 順序恢復，set 與 cancel 競態只有一個穩定獲勝方。協程會在呼叫
+`set()` 或要求取消的執行緒恢復；需要 RunLoop 親和時應明確等待 Scheduler。事件必須比所有
+等待者活得更久。
 
 `auto guard = co_await mutex.lock_async()` 無分配地取得 `AsyncMutex`，並透過 RAII 釋放。競爭
 等待者依 FIFO 順序取得所有權並在釋放執行緒恢復；所有權不綁定執行緒。mutex 必須比所有 Guard
@@ -229,14 +237,15 @@ set 不做任何事。事件不可移動且必須比等待者活得更久；v1 �
 `std`，不會向使用端重新匯出整個標準函式庫。
 
 `RunLoop::run()` 消費一個根 Task，在呼叫執行緒執行就緒協程，回傳結果並重新拋出例外。
-`Scheduler::schedule()` 始終暫停目前協程並把 continuation 放入佇列；`schedule_after()`
-等待相對的 `steady_clock` 時長，`schedule_at()` 等待絕對的單調時鐘時間點。期限到達只讓
+`Scheduler::schedule()` 始終暫停目前協程並把 continuation 放入佇列；它的
+`std::stop_token` 多載可以取消該排隊等待。`schedule_after()` 等待相對的 `steady_clock`
+時長，`schedule_at()` 等待絕對的單調時鐘時間點。期限到達只讓
 任務具備執行資格，不會 inline 恢復。Scheduler 可以複製，但始終屬於建立它的 RunLoop。
 支援依序多次呼叫 `run()`，巢狀或並行呼叫會被拒絕。已經被移動的 Task 不得再次等待。
 
-接受 `std::stop_token` 的定時多載也始終暫停。如果取消先於期限獲勝，等待會拋出
-`OperationCancelled`；較晚的停止要求不能取代已經進入就緒佇列的期限完成。停止回呼只喚醒
-RunLoop，使用者協程仍由執行 `run()` 的執行緒恢復。目前取消透過 O(n) 掃描定位計時器。
+所有接受 `std::stop_token` 的 Scheduler 多載仍會排隊，包括預先取消的等待。如果取消先於
+消費獲勝，等待會拋出 `OperationCancelled`；較晚的停止要求不能取代已經獲勝的完成。停止回呼
+只喚醒 RunLoop，使用者協程仍由執行 `run()` 的執行緒恢復。目前取消透過 O(n) 掃描定位佇列項。
 
 RunLoop 不是背景執行緒，也不會把阻塞程式碼自動變成非同步程式碼。如果 Task 暫停後沒有
 安排未來的恢復動作，`run()` 可能一直等待。CMP 不提供隱式執行緒親和：外部 awaiter 在其他
@@ -250,18 +259,22 @@ RunLoop 不是背景執行緒，也不會把阻塞程式碼自動變成非同步
 ├── mcpp.toml                      # 套件識別與測試相依
 ├── src/cmp.cppm                   # 根模組介面
 ├── src/task.cppm                  # Task 模組分割區
+├── src/cancellation.cppm          # 共用的協作式取消例外
 ├── src/run_loop.cppm              # RunLoop 與 Scheduler 分割區
 ├── src/when_all.cppm              # 結構化並行 Task 匯合
 ├── src/task_group.cppm             # eager 可變結構化 Task 作用域
 ├── src/one_shot_event.cppm         # 無分配一次性通知
+├── src/async_manual_reset_event.cppm # 可複用、可取消通知
 ├── src/async_mutex.cppm            # FIFO 協程感知 RAII 互斥鎖
 ├── tests/cmp_test.cpp             # Task 契約和生命週期測試
 ├── tests/run_loop_test.cpp        # 排程、邊界和執行緒測試
 ├── tests/when_all_test.cpp        # 匯合所有權、結果和競態測試
 ├── tests/task_group_test.cpp       # 可變作用域生命週期和競態測試
 ├── tests/one_shot_event_test.cpp   # 事件發布和競態測試
+├── tests/async_manual_reset_event_test.cpp # 可複用事件競態測試
 ├── tests/async_mutex_test.cpp       # mutex 所有權和交接測試
 ├── examples/basic/                # 獨立的路徑相依 consumer
+├── benchmarks/v1-readiness/       # 本機計算、檔案和回環網路基線
 ├── docs/architecture.zh.hant.md   # 目前結構、邊界與演進方向
 └── .github/workflows/             # Linux、macOS 和 Windows CI
 ```
@@ -273,8 +286,10 @@ RunLoop 不是背景執行緒，也不會把阻塞程式碼自動變成非同步
 本機驗證路徑：
 
 ```bash
-mcpp build --cache=off
-mcpp test --cache=off
+mcpp build --profile dev --strict --cache=off
+mcpp test --profile dev --strict --cache=off
+mcpp build --profile release --strict --cache=off
+mcpp test --profile release --strict --cache=off
 cd examples/basic && mcpp run
 ```
 
@@ -283,6 +298,8 @@ CI 在 Linux、macOS 和 Windows 上執行等價的建構、測試與獨立範�
 
 CMP 目前不追蹤 `mcpp.lock`，`.gitignore` 明確執行這項儲存庫約定。執行期相依放在
 `[dependencies]`，gtest 明確宣告在 `[dev-dependencies.compat]` 中。
+目前本機套件包含 7 個測試二進位檔、90 項測試。僅用於 POSIX 的 Release 壓測 consumer 及其
+成功/失敗資料記錄在 [v1 可開發性壓測](docs/benchmarks/2026-08-29-cmp-v1-readiness.md)。
 
 ## 路線圖
 
@@ -291,8 +308,8 @@ CMP 目前不追蹤 `mcpp.lock`，`.gitignore` 明確執行這項儲存庫約定
 1. 套件識別與可匯入模組 bootstrap——已完成；
 2. 協程 task 與生命週期語意——已實作初始 `Task`；
 3. 根任務驅動器和最小單執行緒排程器——已完成初始實作；
-4. 單調時鐘 Timer v1、可取消定時等待、變參/vector 匯合、TaskGroup v1、OneShotEvent v1 和
-   AsyncMutex v1——已實作；遞迴作用域接納、更廣泛的取消傳播和可複用喚醒路徑仍待開發；
+4. 單調時鐘 Timer v1、可取消就緒/定時等待、變參/vector 匯合、靜止點 TaskGroup、
+   OneShotEvent、AsyncManualResetEvent 和 AsyncMutex——已實作並完成壓力驗證；
 5. 多 worker 排程與 work stealing；
 6. 非同步 I/O 整合和 blocking pool。
 

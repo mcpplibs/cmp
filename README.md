@@ -9,6 +9,7 @@
 **English** · [简体中文](README.zh.md) · [繁體中文](README.zh.hant.md)
 
 [mcpp](https://github.com/mcpp-community/mcpp) · [Architecture](docs/architecture.md) ·
+[v1 readiness benchmark](docs/benchmarks/2026-08-29-cmp-v1-readiness.md) ·
 [Issues](https://github.com/mcpplibs/cmp/issues)
 
 [![ci-linux](https://github.com/mcpplibs/cmp/actions/workflows/ci-linux.yml/badge.svg?branch=main)](https://github.com/mcpplibs/cmp/actions/workflows/ci-linux.yml)
@@ -17,10 +18,10 @@
 
 > [!IMPORTANT]
 > CMP provides a lazy, single-consumer `Task<T>` / `Task<void>`, structured variadic and vector
-> `when_all()`, an eager structured `TaskGroup`, a one-way `OneShotEvent`, an RAII `AsyncMutex`, and
-> a caller-thread `RunLoop` with explicit and monotonic timed scheduling. Timed waits and TaskGroup children can
-> use explicit cooperative cancellation with `std::stop_token`; asynchronous I/O and detached
-> execution are not implemented.
+> `when_all()`, an eager structured `TaskGroup`, one-shot and reusable events, an RAII `AsyncMutex`,
+> and a caller-thread `RunLoop` with explicit and monotonic timed scheduling. Ready scheduling,
+> timed waits, reusable-event waits, and TaskGroup children can use explicit cooperative
+> cancellation with `std::stop_token`; asynchronous I/O and detached execution are not implemented.
 
 CMP is being built as a modern coroutine runtime and library on standard stackless C++
 coroutines. Its explicit `co_await` model now covers fixed and incremental structured concurrency,
@@ -74,11 +75,10 @@ cd examples/basic
 mcpp run
 ```
 
-The example prints `Coroutine result: 42`, joins two timed Tasks and prints
-`Concurrent result: 42`, eagerly spawns two scoped Tasks and prints `Task group result: 42`, awaits
-a one-time notification and prints `Event signalled`, runs two guarded Tasks and prints
-`Mutex result: 42`, then prints `Coroutine cancelled` from a pre-cancelled timed wait. All messages
-come from `Task<void>` coroutines.
+The example prints `Coroutine result: 42`, `Concurrent result: 42`, `Task group result: 42`, and
+`Recursive group result: 3`; it then demonstrates one-shot and reusable notifications with
+`Event signalled` and `Reusable event cycles: 2`, prints `Mutex result: 42`, and finishes with
+`Coroutine cancelled`. All messages come from `Task<void>` coroutines.
 
 ## Current API
 
@@ -219,17 +219,22 @@ parameter order is rethrown. Named Tasks must be moved into `when_all()`. A runt
 homogeneous collection can be passed as `std::vector<Task<T>>`; it returns a result vector in the
 same index order, and a named input vector must also be moved.
 
-`TaskGroup::spawn()` takes ownership of a `Task<void>` and starts it immediately. Awaiting the
-single-use `join()` closes admission and waits for every accepted child before rethrowing the first
-exception in admission order. The group must be joined before destruction. `get_stop_token()` and
-`request_stop()` provide one explicit standard cancellation channel; the token is not injected
-automatically, so developers pass it to children that support cancellation. Use `when_all()` when
-child results must be returned.
+`TaskGroup::spawn()` takes ownership of a `Task<void>` and starts it immediately. The single-use
+`join()` waits until the group reaches quiescence; an active child may recursively add work while
+join is waiting. Admission closes permanently when the active count reaches zero. The group must
+be joined before destruction. `get_stop_token()` and `request_stop()` provide one explicit
+standard cancellation channel, while `cancel_and_join()` requests that channel before joining.
+The token is not injected automatically. Use `when_all()` when child results must be returned.
 
 `co_await event` suspends on an unset `OneShotEvent` without allocating. The first thread-safe
 `set()` permanently sets it and resumes every registered waiter exactly once on the setter thread;
 later waits continue inline and later sets do nothing. The event is immovable and must outlive its
 waiters. It deliberately has no reset or implicit Scheduler transfer.
+
+`AsyncManualResetEvent` adds reusable `set()` / `reset()` cycles. `wait(stop_token)` supports
+cooperative cancellation, pending waiters are resumed in FIFO order, and set-versus-cancel has one
+stable winner. Resumption occurs on the thread calling `set()` or requesting cancellation; await a
+Scheduler explicitly when RunLoop affinity is required. The event must outlive every waiter.
 
 `auto guard = co_await mutex.lock_async()` acquires `AsyncMutex` without allocating a waiter and
 releases it through RAII. Contended waiters acquire in FIFO order and resume on the releasing
@@ -242,16 +247,18 @@ library.
 
 `RunLoop::run()` consumes one root Task, executes ready coroutines on the calling thread, returns
 its value, and rethrows its exception. `Scheduler::schedule()` always suspends and queues the
-continuation. `schedule_after()` waits for a relative `steady_clock` duration, while
+continuation; its `std::stop_token` overload can cancel that queued wait. `schedule_after()` waits
+for a relative `steady_clock` duration, while
 `schedule_at()` waits for an absolute steady-clock time point; expiry makes work eligible and
 never resumes it inline. Scheduler handles are copyable, but remain tied to their originating
 RunLoop. Sequential `run()` calls are supported; nested or concurrent calls are rejected. A
 moved-from Task must not be awaited.
 
-The timed overloads accepting `std::stop_token` also always suspend. If cancellation wins before
-the deadline, awaiting throws `OperationCancelled`; a late stop request cannot replace an already
-queued deadline completion. The stop callback only wakes the RunLoop, so user coroutine code is
-still resumed by the thread driving `run()`. Cancellation currently performs an O(n) timer lookup.
+All Scheduler overloads accepting `std::stop_token` still queue, including pre-cancelled waits. If
+cancellation wins before consumption, awaiting throws `OperationCancelled`; a late stop request
+cannot replace a completion that already won. The stop callback only wakes the RunLoop, so user
+coroutine code is resumed by the thread driving `run()`. Cancellation currently performs an O(n)
+queue lookup.
 
 RunLoop is not a background thread and does not make blocking code asynchronous. A Task that
 suspends without arranging a future resume can leave `run()` waiting indefinitely. CMP does not
@@ -266,18 +273,22 @@ await the desired Scheduler to return to its RunLoop.
 ├── mcpp.toml                 # package identity and test dependency
 ├── src/cmp.cppm              # root module interface
 ├── src/task.cppm             # Task module partition
+├── src/cancellation.cppm     # shared cooperative-cancellation exception
 ├── src/run_loop.cppm         # RunLoop and Scheduler partition
 ├── src/when_all.cppm         # structured concurrent Task join
 ├── src/task_group.cppm       # eager mutable structured Task scope
 ├── src/one_shot_event.cppm   # allocation-free one-time notification
+├── src/async_manual_reset_event.cppm # reusable cancellable notification
 ├── src/async_mutex.cppm      # FIFO coroutine-aware RAII mutex
 ├── tests/cmp_test.cpp        # Task contract and lifetime tests
 ├── tests/run_loop_test.cpp   # scheduler, boundary, and threading tests
 ├── tests/when_all_test.cpp   # join ownership, result, and race tests
 ├── tests/task_group_test.cpp # mutable scope lifetime and race tests
 ├── tests/one_shot_event_test.cpp # event publication and race tests
+├── tests/async_manual_reset_event_test.cpp # reusable event race tests
 ├── tests/async_mutex_test.cpp # mutex ownership and hand-off tests
 ├── examples/basic/           # standalone path-dependency consumer
+├── benchmarks/v1-readiness/  # local compute, file, and loopback baseline
 ├── docs/architecture.md      # current structure, boundaries, and evolution
 └── .github/workflows/        # Linux, macOS, and Windows CI
 ```
@@ -290,8 +301,10 @@ after CMP has a stable runtime API worth demonstrating.
 The local verification path is:
 
 ```bash
-mcpp build --cache=off
-mcpp test --cache=off
+mcpp build --profile dev --strict --cache=off
+mcpp test --profile dev --strict --cache=off
+mcpp build --profile release --strict --cache=off
+mcpp test --profile release --strict --cache=off
 cd examples/basic && mcpp run
 ```
 
@@ -301,6 +314,9 @@ global mcpp installation.
 
 CMP does not track `mcpp.lock`; `.gitignore` enforces that repository policy. Runtime dependencies
 belong in `[dependencies]`; gtest is declared explicitly under `[dev-dependencies.compat]`.
+The current local suite contains 90 tests across seven binaries. The POSIX-only Release pressure
+consumer and its recorded success/failure data are documented in the
+[v1 readiness benchmark](docs/benchmarks/2026-08-29-cmp-v1-readiness.md).
 
 ## Roadmap
 
@@ -309,9 +325,8 @@ Runtime work is split into independently reviewable phases:
 1. package identity and importable-module bootstrap — implemented;
 2. coroutine task and lifetime semantics — initial `Task` implemented;
 3. a root runner and minimal single-thread scheduler — initially implemented;
-4. monotonic Timer v1, cancellable timed waits, variadic/vector joins, TaskGroup v1, OneShotEvent
-   v1, and AsyncMutex v1 — implemented; recursive scope admission, broader cancellation
-   propagation, and reusable wake-up paths remain;
+4. monotonic Timer v1, cancellable ready/timed waits, variadic/vector joins, quiescent TaskGroup,
+   OneShotEvent, AsyncManualResetEvent, and AsyncMutex — implemented and pressure-tested;
 5. multi-worker scheduling and work stealing;
 6. asynchronous I/O integration and a blocking pool.
 

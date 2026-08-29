@@ -3,6 +3,7 @@ import mcpplibs.cmp;
 
 using mcpplibs::cmp::Task;
 using mcpplibs::cmp::RunLoop;
+using mcpplibs::cmp::AsyncManualResetEvent;
 using mcpplibs::cmp::AsyncMutex;
 using mcpplibs::cmp::OperationCancelled;
 using mcpplibs::cmp::OneShotEvent;
@@ -59,6 +60,33 @@ Task<void> print_task_group(RunLoop::Scheduler scheduler) {
     co_return;
 }
 
+Task<void> add_recursively(
+    RunLoop::Scheduler scheduler,
+    TaskGroup& group,
+    int remaining,
+    int& total) {
+    co_await scheduler.schedule();
+    ++total;
+
+    if (remaining > 1) {
+        group.spawn(add_recursively(
+            scheduler,
+            group,
+            remaining - 1,
+            total));
+    }
+    co_return;
+}
+
+Task<void> print_recursive_group(RunLoop::Scheduler scheduler) {
+    int total { 0 };
+    TaskGroup group {};
+    group.spawn(add_recursively(scheduler, group, 3, total));
+    co_await group.join();
+    std::println("Recursive group result: {}", total);
+    co_return;
+}
+
 Task<void> set_event(
     RunLoop::Scheduler scheduler,
     OneShotEvent& event) {
@@ -74,6 +102,29 @@ Task<void> print_event(RunLoop::Scheduler scheduler) {
     co_await event;
     co_await group.join();
     std::println("Event signalled");
+    co_return;
+}
+
+Task<void> set_manual_event(
+    RunLoop::Scheduler scheduler,
+    AsyncManualResetEvent& event) {
+    co_await scheduler.schedule();
+    event.set();
+    co_return;
+}
+
+Task<void> print_manual_reset_event(RunLoop::Scheduler scheduler) {
+    AsyncManualResetEvent event {};
+
+    for (int cycle { 0 }; cycle < 2; ++cycle) {
+        TaskGroup group {};
+        group.spawn(set_manual_event(scheduler, event));
+        co_await event;
+        co_await group.join();
+        event.reset();
+    }
+
+    std::println("Reusable event cycles: 2");
     co_return;
 }
 
@@ -99,10 +150,28 @@ Task<void> print_mutex(RunLoop::Scheduler scheduler) {
     co_return;
 }
 
-Task<void> print_cancellation(RunLoop::Scheduler scheduler, std::stop_token token) {
+Task<void> observe_group_cancellation(
+    RunLoop::Scheduler scheduler,
+    std::stop_token token,
+    bool& cancelled) {
     try {
-        co_await scheduler.schedule_after(1s, token);
+        co_await scheduler.schedule(token);
     } catch (const OperationCancelled&) {
+        cancelled = true;
+    }
+    co_return;
+}
+
+Task<void> print_cancellation(RunLoop::Scheduler scheduler) {
+    bool cancelled { false };
+    TaskGroup group {};
+    group.spawn(observe_group_cancellation(
+        scheduler,
+        group.get_stop_token(),
+        cancelled));
+    co_await group.cancel_and_join();
+
+    if (cancelled) {
         std::println("Coroutine cancelled");
     }
     co_return;
@@ -113,11 +182,10 @@ int main() {
     loop.run(print_answer(loop.get_scheduler()));
     loop.run(print_concurrent_results(loop.get_scheduler()));
     loop.run(print_task_group(loop.get_scheduler()));
+    loop.run(print_recursive_group(loop.get_scheduler()));
     loop.run(print_event(loop.get_scheduler()));
+    loop.run(print_manual_reset_event(loop.get_scheduler()));
     loop.run(print_mutex(loop.get_scheduler()));
-
-    std::stop_source source {};
-    source.request_stop();
-    loop.run(print_cancellation(loop.get_scheduler(), source.get_token()));
+    loop.run(print_cancellation(loop.get_scheduler()));
     return 0;
 }

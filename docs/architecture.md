@@ -6,19 +6,21 @@
 
 CMP is a C++23 module project with a small coroutine execution core. The root module exports a
 lazy, single-consumer `mcpplibs::cmp::Task<T>`, structured variadic/vector `when_all()`, eager
-`TaskGroup`, allocation-free `OneShotEvent`, RAII `AsyncMutex`, `RunLoop`, and its copyable `Scheduler` handle. The
-join primitives own every child until completion, while the event publishes one external signal.
+`TaskGroup`, allocation-free `OneShotEvent`, reusable `AsyncManualResetEvent`, RAII `AsyncMutex`,
+`RunLoop`, and its copyable `Scheduler` handle. Join primitives own every child until completion,
+while the events publish external signals.
 `RunLoop::run()` is the public root execution boundary, while `Scheduler::schedule()` explicitly
-returns a suspended coroutine to that loop. `schedule_after()` and `schedule_at()` add relative
-and absolute `steady_clock` deadlines without a timer thread; overloads accepting
-`std::stop_token` make those waits cooperatively cancellable.
+returns a suspended coroutine to that loop. `schedule()`, `schedule_after()`, and `schedule_at()`
+have `std::stop_token` overloads for cooperative cancellation; timed scheduling uses relative and
+absolute `steady_clock` deadlines without a timer thread.
 
 The repository contains:
 
 - one mcpp package manifest;
-- the root module `mcpplibs.cmp` with Task, RunLoop, join, event, and mutex partitions;
+- the root module `mcpplibs.cmp` with Task, cancellation, RunLoop, join, event, and mutex partitions;
 - gtest contract, lifetime, exception, scheduling, and threading tests;
 - one standalone path-dependency example;
+- one local POSIX pressure consumer for compute, file, and loopback network integration;
 - Linux, macOS, and Windows CI workflows.
 
 ## Package and module identity
@@ -65,10 +67,12 @@ targets. CMP does not track an `mcpp.lock` file; it is excluded by `.gitignore`.
 ├── src/
 │   ├── cmp.cppm
 │   ├── task.cppm
+│   ├── cancellation.cppm
 │   ├── run_loop.cppm
 │   ├── when_all.cppm
 │   ├── task_group.cppm
 │   ├── one_shot_event.cppm
+│   ├── async_manual_reset_event.cppm
 │   └── async_mutex.cppm
 ├── tests/
 │   ├── cmp_test.cpp
@@ -76,14 +80,18 @@ targets. CMP does not track an `mcpp.lock` file; it is excluded by `.gitignore`.
 │   ├── when_all_test.cpp
 │   ├── task_group_test.cpp
 │   ├── one_shot_event_test.cpp
+│   ├── async_manual_reset_event_test.cpp
 │   └── async_mutex_test.cpp
+├── benchmarks/v1-readiness/
+│   ├── mcpp.toml
+│   └── src/main.cpp
 └── mcpp.toml
 ```
 
 ## Build and tests
 
 `.xlings.json` pins the mcpp version used by the project. `mcpp build` builds the inferred library
-target. `mcpp test` discovers six test files and links a gtest entry point for each. The tests
+target. `mcpp test` discovers seven test files and links a gtest entry point for each. The 90 tests
 verify Task ownership and symmetric transfer together with structured joins, root execution,
 scheduling, exception propagation, timed and cross-thread wake-up, cancellation races, invalid
 scheduler use, loop reuse, and stack-safe repeated completion.
@@ -114,7 +122,7 @@ standard = "c++23"
 cmp = { path = "../.." }
 ```
 
-Its program uses the same import path as an external package:
+This abridged API sample uses the same import path as an external package:
 
 ```cpp
 import std;
@@ -244,9 +252,11 @@ compilation, and the public root runner independently of the root test targets. 
 `print_answer()` on the main thread; a short monotonic timer expires before the coroutine prints
 `Coroutine result: 42`. The next root Task concurrently joins two timed values and prints
 `Concurrent result: 42`. The next coroutine eagerly spawns and joins two void Tasks before printing
-`Task group result: 42`. Another coroutine awaits a one-time signal and prints `Event signalled`.
-Two guarded Tasks produce `Mutex result: 42`. A final coroutine catches `OperationCancelled` from
-a pre-cancelled timed wait and prints `Coroutine cancelled`.
+`Task group result: 42`; a recursively growing group then prints `Recursive group result: 3`.
+Other coroutines print `Event signalled`, exercise two reusable-event cycles, and print
+`Reusable event cycles: 2`. Two guarded Tasks produce `Mutex result: 42`. A final structured group
+uses `cancel_and_join()` and catches `OperationCancelled` from cancellable ready scheduling before
+printing `Coroutine cancelled`.
 
 Any translation unit that defines a coroutine imports `std` itself so `std::coroutine_traits` and
 the standard coroutine protocol types participate in compilation. The CMP module imports `std`
@@ -282,12 +292,16 @@ contract violation.
 `TaskGroup` has the following contract:
 
 - `spawn(Task<void>)` accepts ownership and starts the child inline before returning;
-- concurrent admission is serialized, while awaiting the single-use `join()` closes admission;
+- concurrent admission is serialized; an active child may recursively admit work while the
+  single-use `join()` is waiting;
+- admission closes permanently when the active count reaches zero; external admission racing the
+  last completion has no guaranteed winner;
 - every accepted child reaches a terminal state before join resumes;
 - the first exception in admission order is rethrown only after all children finish;
 - the group is immovable and must be unused or joined when destroyed; otherwise it terminates;
 - `get_stop_token()` and `request_stop()` expose an explicit standard cancellation channel but do
   not inject it into Tasks;
+- `cancel_and_join()` lazily requests that channel and then performs the same join;
 - the final child resumes join on its completion thread; no scheduler affinity is implicit.
 
 `OneShotEvent` has the following contract:
@@ -299,6 +313,16 @@ contract violation.
 - waiters resume inline on the setter thread in unspecified order;
 - the event is immovable and must outlive every waiter; pending destruction terminates;
 - reset, cancellation-aware removal, values, and implicit Scheduler transfer are not provided.
+
+`AsyncManualResetEvent` has the following contract:
+
+- a default event is unset; `set()` resumes pending waiters in FIFO order and keeps later waits ready;
+- `reset()` changes only future waits, while waiters already selected by set still complete;
+- `wait(stop_token)` removes one cancelled pending waiter in O(1), and a pre-cancelled wait wins;
+- set versus cancellation has exactly one winner and resumes the waiter exactly once;
+- waiters resume on the setter or cancellation-request thread, with no implicit Scheduler transfer;
+- a thread-local dispatch trampoline keeps nested signal chains stack-safe;
+- the event is immovable and must outlive every waiter; pending destruction terminates.
 
 `AsyncMutex` has the following contract:
 
@@ -316,15 +340,16 @@ contract violation.
 - a root value, including a move-only value, is returned; a root exception is rethrown;
 - a RunLoop can be reused sequentially, but nested and concurrent `run()` calls throw
   `std::logic_error`;
-- `schedule()` always suspends and appends its continuation to a thread-safe FIFO ready queue;
+- `schedule()` always suspends and appends its continuation to a thread-safe FIFO ready queue; its
+  token-taking overload can cancel the queued wait before consumption;
 - `schedule_after()` measures a native `steady_clock` duration at suspension, while
   `schedule_at()` accepts an absolute steady-clock time point;
-- token-taking timed overloads always suspend; cancellation wins by throwing
-  `OperationCancelled`, while a late stop request cannot replace a deadline already queued;
+- all token-taking overloads still queue, including pre-cancelled waits; cancellation wins by
+  throwing `OperationCancelled`, while a late stop request cannot replace a completion that won;
 - elapsed deadlines remain asynchronous; future deadlines use a minimum timer heap, and expiry
   only makes the continuation eligible for FIFO dispatch;
-- stop callbacks only change timer state and wake the RunLoop; they never resume user coroutine
-  code inline, and cancellation currently locates its timer with an O(n) scan;
+- stop callbacks only change ready/timer state and wake the RunLoop; they never resume user
+  coroutine code inline, and cancellation currently locates its queue entry with an O(n) scan;
 - producers may enqueue from other threads, but only the thread inside `run()` consumes the queue;
 - using a Scheduler after its RunLoop is destroyed, or while its own RunLoop is not active, throws
   `std::logic_error` from the await expression;
@@ -339,9 +364,9 @@ thread on which the coroutine currently executes.
 
 There is no public free-standing `sync_wait`, detached execution, standalone Timer handle,
 asynchronous I/O backend, custom frame allocator, or blocking-work pool. Cancellation remains
-explicit: timed waits accept tokens and TaskGroup owns an optional shared stop channel, but the
-module provides neither implicit propagation nor a token overload for plain `schedule()`, and no
-compatibility alias for the old scaffold module.
+explicit: Scheduler waits and `AsyncManualResetEvent` accept tokens, and TaskGroup owns an optional
+shared stop channel, but the module provides no implicit propagation and no compatibility alias for
+the old scaffold module.
 
 Capturing coroutine lambdas require particular care: invoking a temporary capturing lambda can
 leave the lazy coroutine referring to a destroyed closure. CMP does not yet provide a helper that
@@ -356,35 +381,38 @@ scheduler and do not make a blocking operation asynchronous.
 The following areas may be considered in separate designs. They are not part of the current
 package contract:
 
-1. recursive scope admission, result handles, and broader cancellation propagation;
-2. reusable events, channels, and additional structured wake-up paths;
+1. TaskGroup result handles and additional cancellation-aware primitives;
+2. channels and additional structured wake-up paths;
 3. multi-worker scheduling and work stealing;
 4. asynchronous I/O integrations;
 5. a dedicated pool for unavoidable blocking work;
 6. result adapters and optional coroutine-frame allocation strategies.
 
-Task, RunLoop, `when_all`, TaskGroup, OneShotEvent, and AsyncMutex occupy separate module partitions because
-they are implemented public boundaries. Further partitions or implementation units are added only
-when another implemented API needs them.
+Task, cancellation, RunLoop, `when_all`, TaskGroup, OneShotEvent, AsyncManualResetEvent, and
+AsyncMutex occupy separate module partitions because they are implemented public boundaries.
+Further partitions or implementation units are added only when another implemented API needs them.
 
 ## Verification
 
 Run from the repository root:
 
 ```text
-mcpp build --cache=off
-mcpp test --cache=off
+mcpp build --profile dev --strict --cache=off
+mcpp test --profile dev --strict --cache=off
+mcpp build --profile release --strict --cache=off
+mcpp test --profile release --strict --cache=off
 cd examples/basic
 mcpp run
 ```
 
-The expected result is a successful library build, 74 passing tests across six binaries, and an
+The expected result is a successful library build, 90 passing tests across seven binaries, and an
 example that prints `Coroutine result: 42`, `Concurrent result: 42`, `Task group result: 42`,
-`Event signalled`, `Mutex result: 42`, then `Coroutine cancelled` and exits with status 0. Tests perform one million
-immediate Task completions, 100,000 immediate two-Task joins, 50,000 immediate two-Task vector
-joins, 50,000 eager TaskGroup completions, 50,000 event waiters, 50,000 mutex hand-offs, 100,000 explicit schedules,
-100,000 immediate timers, and 100,000 pre-cancelled timed waits. These check that symmetric
-transfer and all joined or queued paths do
-not grow the native call stack. The current Windows LLVM toolchain
+`Recursive group result: 3`, `Event signalled`, `Reusable event cycles: 2`, `Mutex result: 42`, then
+`Coroutine cancelled` and exits with status 0. Tests retain the existing high-volume stack checks
+and add 20,000 recursive TaskGroup admissions, 100,000 pre-cancelled ready schedules, 50,000 manual
+event waiters, 20,000 nested reusable-event signals, and set/cancel races. Focused phase-4 race
+suites pass repeated Release runs. Compute, temporary-file, and loopback-network counts and
+throughput are recorded in the
+[v1 readiness benchmark](benchmarks/2026-08-29-cmp-v1-readiness.md). The current Windows LLVM toolchain
 does not emit GNU depfiles. If a file included by a module interface changes, an incremental build
 can reuse an older BMI or object; `--cache=off` is used for a full local verification.

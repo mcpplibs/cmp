@@ -75,6 +75,48 @@ struct CancellationRecord final {
     std::thread::id thread_ {};
 };
 
+Task<CancellationRecord> schedule_once(
+    Scheduler scheduler,
+    std::stop_token stopToken) {
+    try {
+        co_await scheduler.schedule(stopToken);
+        co_return CancellationRecord {
+            false,
+            Clock::now(),
+            std::this_thread::get_id()
+        };
+    } catch (const OperationCancelled&) {
+        co_return CancellationRecord {
+            true,
+            Clock::now(),
+            std::this_thread::get_id()
+        };
+    }
+}
+
+Task<void> schedule_uncaught(
+    Scheduler scheduler,
+    std::stop_token stopToken) {
+    co_await scheduler.schedule(stopToken);
+}
+
+Task<int> schedule_pre_cancelled_ready_many_times(
+    Scheduler scheduler,
+    std::stop_token stopToken,
+    int count) {
+    int cancellationCount { 0 };
+
+    for (int index { 0 }; index < count; ++index) {
+        try {
+            co_await scheduler.schedule(stopToken);
+        } catch (const OperationCancelled&) {
+            ++cancellationCount;
+        }
+    }
+
+    co_return cancellationCount;
+}
+
 Task<ResumeRecord> schedule_after_once(
     Scheduler scheduler,
     Duration delay) {
@@ -382,6 +424,64 @@ EagerOperation record_cancellable_after(
     }
 }
 
+EagerOperation record_cancellable_schedule(
+    Scheduler scheduler,
+    std::stop_token stopToken,
+    int& phase,
+    int& resumedPhase,
+    bool& cancelled,
+    int& resumeCount) {
+    try {
+        co_await scheduler.schedule(stopToken);
+    } catch (const OperationCancelled&) {
+        cancelled = true;
+    }
+
+    resumedPhase = phase;
+    ++resumeCount;
+}
+
+Task<void> cancel_ready_before_consumption(
+    Scheduler scheduler,
+    std::stop_source& stopSource,
+    std::optional<EagerOperation>& operation,
+    int& resumedPhase,
+    bool& cancelled,
+    int& resumeCount) {
+    int phase { 1 };
+    operation.emplace(record_cancellable_schedule(
+        scheduler,
+        stopSource.get_token(),
+        phase,
+        resumedPhase,
+        cancelled,
+        resumeCount));
+
+    stopSource.request_stop();
+    phase = 2;
+    co_await scheduler.schedule();
+}
+
+Task<void> stop_after_schedule_is_consumed(
+    Scheduler scheduler,
+    std::stop_source& stopSource,
+    std::optional<EagerOperation>& operation,
+    bool& cancelled,
+    int& resumeCount) {
+    int phase { 1 };
+    int resumedPhase { 0 };
+    operation.emplace(record_cancellable_schedule(
+        scheduler,
+        stopSource.get_token(),
+        phase,
+        resumedPhase,
+        cancelled,
+        resumeCount));
+
+    co_await scheduler.schedule();
+    stopSource.request_stop();
+}
+
 Task<void> run_timer_group(
     Scheduler scheduler,
     std::vector<EagerOperation>& operations,
@@ -542,6 +642,79 @@ TEST(CmpRunLoopTest, SchedulingReturnsFromAnotherThread) {
 
     EXPECT_NE(workerThread, callingThread);
     EXPECT_EQ(resumedThread, callingThread);
+}
+
+TEST(CmpRunLoopTest, CancellableSchedulingCompletesAndDeregisters) {
+    RunLoop loop {};
+    std::stop_source stopSource {};
+    const auto callingThread = std::this_thread::get_id();
+
+    const auto result = loop.run(schedule_once(
+        loop.get_scheduler(),
+        stopSource.get_token()));
+
+    EXPECT_FALSE(result.cancelled_);
+    EXPECT_EQ(result.thread_, callingThread);
+    EXPECT_TRUE(stopSource.request_stop());
+    loop.run(do_nothing());
+}
+
+TEST(CmpRunLoopTest, PreRequestedSchedulingCancellationStillQueues) {
+    RunLoop loop {};
+    std::stop_source stopSource {};
+    const auto callingThread = std::this_thread::get_id();
+    stopSource.request_stop();
+
+    EXPECT_FALSE(loop.get_scheduler().schedule(
+        stopSource.get_token()).await_ready());
+
+    const auto result = loop.run(schedule_once(
+        loop.get_scheduler(),
+        stopSource.get_token()));
+
+    EXPECT_TRUE(result.cancelled_);
+    EXPECT_EQ(result.thread_, callingThread);
+}
+
+TEST(CmpRunLoopTest, ReadyCancellationHasOneStableWinner) {
+    RunLoop loop {};
+
+    {
+        std::stop_source stopSource {};
+        std::optional<EagerOperation> operation {};
+        int resumedPhase { 0 };
+        bool cancelled { false };
+        int resumeCount { 0 };
+
+        loop.run(cancel_ready_before_consumption(
+            loop.get_scheduler(),
+            stopSource,
+            operation,
+            resumedPhase,
+            cancelled,
+            resumeCount));
+
+        EXPECT_TRUE(cancelled);
+        EXPECT_EQ(resumedPhase, 2);
+        EXPECT_EQ(resumeCount, 1);
+    }
+
+    {
+        std::stop_source stopSource {};
+        std::optional<EagerOperation> operation {};
+        bool cancelled { false };
+        int resumeCount { 0 };
+
+        loop.run(stop_after_schedule_is_consumed(
+            loop.get_scheduler(),
+            stopSource,
+            operation,
+            cancelled,
+            resumeCount));
+
+        EXPECT_FALSE(cancelled);
+        EXPECT_EQ(resumeCount, 1);
+    }
 }
 
 TEST(CmpRunLoopTest, TimedSchedulingNeverResumesBeforeItsDeadline) {
@@ -868,6 +1041,17 @@ TEST(CmpRunLoopTest, RejectsInvalidSchedulersBeforeCancellation) {
     stopSource.request_stop();
 
     EXPECT_THROW(
+        driver.run(schedule_uncaught(
+            owner.get_scheduler(),
+            stopSource.get_token())),
+        std::logic_error);
+    EXPECT_THROW(
+        driver.run(schedule_uncaught(
+            expired,
+            stopSource.get_token())),
+        std::logic_error);
+
+    EXPECT_THROW(
         driver.run(schedule_after_uncaught(
             owner.get_scheduler(),
             Duration::max(),
@@ -899,6 +1083,12 @@ TEST(CmpRunLoopTest, UncaughtCancellationCleansAndKeepsLoopReusable) {
     RunLoop loop {};
     std::stop_source stopSource {};
     stopSource.request_stop();
+
+    EXPECT_THROW(
+        loop.run(schedule_uncaught(
+            loop.get_scheduler(),
+            stopSource.get_token())),
+        OperationCancelled);
 
     EXPECT_THROW(
         loop.run(schedule_after_uncaught(
@@ -1063,6 +1253,20 @@ TEST(CmpRunLoopTest, RepeatedPreCancelledTimersDoNotGrowTheStack) {
             stopSource.get_token(),
             TIMER_COUNT)),
         TIMER_COUNT);
+}
+
+TEST(CmpRunLoopTest, RepeatedPreCancelledSchedulingDoesNotGrowTheStack) {
+    constexpr int SCHEDULE_COUNT { 100'000 };
+    RunLoop loop {};
+    std::stop_source stopSource {};
+    stopSource.request_stop();
+
+    EXPECT_EQ(
+        loop.run(schedule_pre_cancelled_ready_many_times(
+            loop.get_scheduler(),
+            stopSource.get_token(),
+            SCHEDULE_COUNT)),
+        SCHEDULE_COUNT);
 }
 
 }  // namespace

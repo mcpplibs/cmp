@@ -6,18 +6,20 @@
 
 CMP 是一個具備小型協程執行核心的 C++23 模組專案。根模組匯出延遲啟動、單一消費者的
 `mcpplibs::cmp::Task<T>`、結構化變參/vector `when_all()`、eager `TaskGroup`、`RunLoop` 及其
-可複製的 `Scheduler` 控制代碼、無分配 `OneShotEvent` 和 RAII `AsyncMutex`。匯合原語會持有每個子任務直到結束，
-一次性事件負責發布一個外部訊號。`RunLoop::run()` 是公開根任務執行邊界，
-`Scheduler::schedule()` 用於明確地把暫停協程送回對應執行迴圈。
-`schedule_after()` 和 `schedule_at()` 在沒有計時執行緒的情況下提供相對和絕對的
-`steady_clock` 期限；接受 `std::stop_token` 的多載使這些等待可以協作式取消。
+可複製的 `Scheduler` 控制代碼、無分配 `OneShotEvent`、可複用
+`AsyncManualResetEvent` 和 RAII `AsyncMutex`。匯合原語會持有每個子任務直到結束，事件負責
+發布外部訊號。`RunLoop::run()` 是公開根任務執行邊界，`Scheduler::schedule()` 用於明確地
+把暫停協程送回對應執行迴圈。`schedule()`、`schedule_after()` 和 `schedule_at()` 都有接受
+`std::stop_token` 的協作式取消多載；定時排程使用相對和絕對的 `steady_clock` 期限，且不建立
+計時執行緒。
 
 儲存庫現有內容包括：
 
 - 一份 mcpp 套件清單；
-- 根模組 `mcpplibs.cmp` 及 Task、RunLoop、join、event、mutex 模組分割區；
+- 根模組 `mcpplibs.cmp` 及 Task、cancellation、RunLoop、join、event、mutex 模組分割區；
 - 涵蓋契約、生命週期、例外、排程和執行緒行為的 gtest 測試；
 - 一個透過路徑相依使用根套件的獨立範例；
+- 一個驗證計算、檔案與回環網路整合的本機 POSIX 壓測 consumer；
 - Linux、macOS 和 Windows 三套 CI 工作流程。
 
 ## 套件和模組識別
@@ -62,10 +64,12 @@ mcpp 套件由 `mcpplibs` 和 `cmp` 共同識別。使用端在 `[dependencies.m
 ├── src/
 │   ├── cmp.cppm
 │   ├── task.cppm
+│   ├── cancellation.cppm
 │   ├── run_loop.cppm
 │   ├── when_all.cppm
 │   ├── task_group.cppm
 │   ├── one_shot_event.cppm
+│   ├── async_manual_reset_event.cppm
 │   └── async_mutex.cppm
 ├── tests/
 │   ├── cmp_test.cpp
@@ -73,14 +77,18 @@ mcpp 套件由 `mcpplibs` 和 `cmp` 共同識別。使用端在 `[dependencies.m
 │   ├── when_all_test.cpp
 │   ├── task_group_test.cpp
 │   ├── one_shot_event_test.cpp
+│   ├── async_manual_reset_event_test.cpp
 │   └── async_mutex_test.cpp
+├── benchmarks/v1-readiness/
+│   ├── mcpp.toml
+│   └── src/main.cpp
 └── mcpp.toml
 ```
 
 ## 建置與測試
 
 `.xlings.json` 固定專案使用的 mcpp 版本。`mcpp build` 建置自動推斷的函式庫目標。
-`mcpp test` 會找到六個測試檔案，並為每個檔案連結 gtest 進入點。測試同時驗證 Task 所有權
+`mcpp test` 會找到七個測試檔案，並為每個檔案連結 gtest 進入點。90 項測試同時驗證 Task 所有權
 和對稱轉移、結構化匯合，以及根任務執行、普通與定時排程、例外傳播、跨執行緒期限喚醒、
 無效 Scheduler、取消競態、RunLoop 重複使用和不會增長呼叫堆疊的重複完成。
 
@@ -108,7 +116,7 @@ standard = "c++23"
 cmp = { path = "../.." }
 ```
 
-範例程式使用與外部專案相同的匯入路徑：
+下面的精簡 API 範例使用與外部專案相同的匯入路徑：
 
 ```cpp
 import std;
@@ -234,12 +242,11 @@ int main() {
 ```
 
 這個範例在根測試目標之外，單獨檢查路徑相依解析、模組使用、外部協程編譯和公開根任務
-驅動器。RunLoop 在主執行緒驅動 `print_answer()`；短單調時鐘計時器到期後，協程輸出
-`Coroutine result: 42`。下一個根任務並行匯合兩個定時結果並輸出
-`Concurrent result: 42`。隨後一個協程 eager 啟動並匯合兩個 void Task，再輸出
-`Task group result: 42`。另一個協程等待一次性訊號並輸出 `Event signalled`，兩個受保護 Task
-隨後輸出 `Mutex result: 42`。最後一個協程從預先取消的定時等待捕捉 `OperationCancelled`，並
-輸出 `Coroutine cancelled`。
+驅動器。RunLoop 依序輸出 `Coroutine result: 42`、`Concurrent result: 42` 和
+`Task group result: 42`；遞迴增長的 group 輸出 `Recursive group result: 3`。其他協程展示
+一次性及兩輪可複用事件並輸出 `Event signalled`、`Reusable event cycles: 2`，兩個受保護
+Task 輸出 `Mutex result: 42`。最後一個結構化 group 使用 `cancel_and_join()`，從可取消就緒
+排程捕捉 `OperationCancelled` 並輸出 `Coroutine cancelled`。
 
 任何定義協程的轉譯單元都要自行匯入 `std`，使 `std::coroutine_traits` 和標準協程協定型別
 參與編譯。CMP 模組私下匯入 `std`，而不是向使用端重新匯出整個標準函式庫。
@@ -273,11 +280,13 @@ int main() {
 `TaskGroup` 遵循以下契約：
 
 - `spawn(Task<void>)` 接管所有權並在傳回前 inline 啟動子任務；
-- 並行接納會序列化，等待僅能使用一次的 `join()` 會關閉接納；
+- 並行接納會序列化；等待僅能使用一次的 `join()` 期間，仍在執行的子任務可以遞迴接納工作；
+- 活動計數歸零時接納永久關閉；外部接納與最後一個完成競態時不保證哪方獲勝；
 - join 恢復前，每個已接納子任務都必須到達終態；
 - 全部子任務完成後，依接納順序重新拋出第一個例外；
 - group 不可移動，解構時必須未使用或已經 join，否則終止程序；
 - `get_stop_token()` 和 `request_stop()` 提供明確的標準取消通道，但不會向 Task 注入 token；
+- `cancel_and_join()` 會在真正被等待時要求該通道，然後執行相同的 join；
 - 最後一個子任務在其完成執行緒恢復 join，不隱式增加排程器親和。
 
 `OneShotEvent` 遵循以下契約：
@@ -289,6 +298,16 @@ int main() {
 - 等待者依未指定順序在 setter 執行緒 inline 恢復；
 - 事件不可移動且必須比所有等待者活得更久；帶 pending 等待者解構會終止程序；
 - 不提供 reset、可取消註銷、值或隱式 Scheduler 轉移。
+
+`AsyncManualResetEvent` 遵循以下契約：
+
+- 預設事件為 unset；`set()` 依 FIFO 恢復 pending 等待者，並讓後續等待保持 ready；
+- `reset()` 只影響未來等待，已被 set 選中的等待者仍會完成；
+- `wait(stop_token)` 以 O(1) 移除一個取消的 pending 等待者，預先取消的等待確定由取消獲勝；
+- set 與取消競態恰有一個獲勝方，等待者只恢復一次；
+- 等待者在 setter 或取消要求執行緒恢復，不隱式轉移 Scheduler；
+- thread-local dispatch trampoline 保證巢狀訊號鏈不增長原生呼叫堆疊；
+- 事件不可移動且必須比所有等待者活得更久；帶 pending 等待者解構會終止程序。
 
 `AsyncMutex` 遵循以下契約：
 
@@ -305,15 +324,16 @@ int main() {
 - `run(Task<T>)` 消費一個根 Task，並在呼叫執行緒執行就緒 continuation；
 - 回傳根任務結果，包括 move-only 結果；根任務例外會重新拋出；
 - RunLoop 可以依序重複使用，但巢狀或並行呼叫 `run()` 會拋出 `std::logic_error`；
-- `schedule()` 始終暫停，並把 continuation 追加到執行緒安全的 FIFO 就緒佇列；
+- `schedule()` 始終暫停，並把 continuation 追加到執行緒安全的 FIFO 就緒佇列；接受 token 的
+  多載可以在消費前取消該排隊等待；
 - `schedule_after()` 在暫停時測量原生 `steady_clock` 時長，`schedule_at()` 接受絕對的
   單調時鐘時間點；
-- 接受 token 的定時多載始終暫停；取消獲勝時拋出 `OperationCancelled`，較晚的停止要求
-  不能取代已經進入就緒佇列的期限完成；
+- 所有接受 token 的多載仍會排隊，包括預先取消的等待；取消獲勝時拋出
+  `OperationCancelled`，較晚的停止要求不能取代已經獲勝的完成；
 - 已到期的期限仍非同步排隊；未來期限進入最小 Timer 堆，到期只讓 continuation 具備進入
   FIFO 排程的資格；
-- 停止回呼只改變計時器狀態並喚醒 RunLoop，不會 inline 恢復使用者協程；目前取消透過 O(n)
-  掃描定位對應計時器；
+- 停止回呼只改變就緒項/計時器狀態並喚醒 RunLoop，不會 inline 恢復使用者協程；目前取消
+  透過 O(n) 掃描定位佇列項；
 - 其他執行緒可以入列，但只有正在執行 `run()` 的執行緒會消費佇列；
 - RunLoop 銷毀後繼續使用其 Scheduler，或在其所屬 RunLoop 未運行時使用 Scheduler，皆會
   從 await 運算式拋出 `std::logic_error`；
@@ -326,9 +346,9 @@ Task；明確等待原 Scheduler 才會把 continuation 送回對應 RunLoop。�
 執行緒。
 
 目前沒有公開自由函式 `sync_wait`、detached 執行、獨立 Timer 控制代碼、非同步 I/O 後端、
-自訂協程框架 allocator 或阻塞工作執行緒池。取消仍是明確的：定時等待接受 token，TaskGroup
-可持有共享 stop 通道，但模組既不提供隱式傳播，也沒有普通 `schedule()` 的 token 多載，
-並且沒有保留舊骨架模組的相容別名。
+自訂協程框架 allocator 或阻塞工作執行緒池。取消仍是明確的：Scheduler 等待和
+`AsyncManualResetEvent` 接受 token，TaskGroup 可持有共享 stop 通道，但模組不提供隱式
+傳播，並且沒有保留舊骨架模組的相容別名。
 
 捕捉變數的協程 lambda 需要特別小心：立即呼叫一個暫時的捕捉 lambda，可能使延遲協程參考
 已經銷毀的閉包。CMP 尚未提供延長該閉包生命週期的輔助函式。
@@ -341,33 +361,37 @@ CMP 名稱中的 `C` 與 Go 執行期中的 `G` 相呼應，但這只說明命�
 
 以下方向可以分別設計和審查，目前都不是套件的既有約定：
 
-1. 遞迴作用域接納、結果控制代碼和更廣泛的取消傳播；
-2. 可複用事件、channel 和更多結構化喚醒路徑；
+1. TaskGroup 結果控制代碼及更多支援取消的原語；
+2. channel 和更多結構化喚醒路徑；
 3. 多工作執行緒排程和工作竊取；
 4. 非同步 I/O 整合；
 5. 處理無法避免之阻塞工作的專用執行緒池；
 6. 結果適配器和可選的協程框架配置策略。
 
-Task、RunLoop、`when_all`、TaskGroup、OneShotEvent 與 AsyncMutex 已形成真實的公開邊界，因此分別位於
-模組分割區中。只有其他已實作 API 確實需要新邊界時，才繼續增加模組分割區或實作單元。
+Task、cancellation、RunLoop、`when_all`、TaskGroup、OneShotEvent、AsyncManualResetEvent 與
+AsyncMutex 已形成真實的公開邊界，因此分別位於模組分割區中。只有其他已實作 API 確實需要
+新邊界時，才繼續增加模組分割區或實作單元。
 
 ## 驗證
 
 在儲存庫根目錄執行：
 
 ```text
-mcpp build --cache=off
-mcpp test --cache=off
+mcpp build --profile dev --strict --cache=off
+mcpp test --profile dev --strict --cache=off
+mcpp build --profile release --strict --cache=off
+mcpp test --profile release --strict --cache=off
 cd examples/basic
 mcpp run
 ```
 
-預期結果是函式庫建置成功、六個二進位檔中的 74 項測試全部通過，而且範例依序輸出
+預期結果是函式庫建置成功、七個二進位檔中的 90 項測試全部通過，而且範例依序輸出
 `Coroutine result: 42`、`Concurrent result: 42`、`Task group result: 42`、
-`Event signalled`、`Mutex result: 42` 和 `Coroutine cancelled` 後以狀態 0 結束。測試分別執行一百萬次立即完成
-的 Task、十萬次立即雙 Task 變參匯合、五萬次立即雙 Task vector 匯合、五萬次 eager TaskGroup
-完成、五萬次事件等待者、五萬次 mutex 交接、十萬次明確
-排程、十萬次立即 Timer 和十萬次預先取消的定時等待，用於檢查對稱轉移以及所有匯合或佇列
-路徑都不會增長原生呼叫堆疊。目前 Windows LLVM 工具鏈
+`Recursive group result: 3`、`Event signalled`、`Reusable event cycles: 2`、
+`Mutex result: 42` 和 `Coroutine cancelled` 後以狀態 0 結束。測試保留原有高容量堆疊安全
+檢查，並增加兩萬次 TaskGroup 遞迴接納、十萬次預取消就緒排程、五萬個 manual event 等待者、
+兩萬次巢狀可複用事件訊號及 set/cancel 競態；第四階段重點競態套件已連續執行多輪 Release
+測試。計算、臨時檔案和回環網路的成功/失敗計數及吞吐記錄在
+[v1 可開發性壓測](benchmarks/2026-08-29-cmp-v1-readiness.md)。目前 Windows LLVM 工具鏈
 不會產生 GNU depfile；如果模組介面包含的檔案發生變更，增量建置可能沿用舊的 BMI 或
 目的檔。完整複驗時使用 `--cache=off`。

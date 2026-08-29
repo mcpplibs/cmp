@@ -1,0 +1,9 @@
+[package]
+name        = "cmp-v1-readiness"
+version     = "0.1.0"
+standard    = "c++23"
+description = "Standalone CMP v1 workload readiness benchmark"
+license     = "Apache-2.0"
+
+[dependencies.mcpplibs]
+cmp = { path = "../.." }

@@ -79,31 +79,28 @@ Task<void> mark_started(bool& started) {
     co_return;
 }
 
-Task<void> try_spawn_after_join_starts(
+Task<void> spawn_after_join_starts(
     Scheduler scheduler,
     TaskGroup& group,
-    bool& rejected,
+    bool& admitted,
     bool& candidateStarted) {
     co_await scheduler.schedule();
 
-    try {
-        group.spawn(mark_started(candidateStarted));
-    } catch (const std::logic_error&) {
-        rejected = true;
-    }
+    group.spawn(mark_started(candidateStarted));
+    admitted = true;
 
     co_return;
 }
 
-Task<void> verify_join_closes_admission(
+Task<void> verify_join_allows_recursive_admission(
     Scheduler scheduler,
-    bool& rejected,
+    bool& admitted,
     bool& candidateStarted) {
     TaskGroup group {};
-    group.spawn(try_spawn_after_join_starts(
+    group.spawn(spawn_after_join_starts(
         scheduler,
         group,
-        rejected,
+        admitted,
         candidateStarted));
     co_await group.join();
 }
@@ -243,6 +240,48 @@ Task<int> run_immediate_group(int count) {
     co_return completed;
 }
 
+Task<void> spawn_recursive_after_schedule(
+    Scheduler scheduler,
+    TaskGroup& group,
+    int remaining,
+    int& completed) {
+    co_await scheduler.schedule();
+
+    if (remaining > 1) {
+        group.spawn(spawn_recursive_after_schedule(
+            scheduler,
+            group,
+            remaining - 1,
+            completed));
+    }
+
+    ++completed;
+    co_return;
+}
+
+Task<int> run_recursive_group(Scheduler scheduler, int count) {
+    int completed { 0 };
+    TaskGroup group {};
+    group.spawn(spawn_recursive_after_schedule(
+        scheduler,
+        group,
+        count,
+        completed));
+    co_await group.join();
+    co_return completed;
+}
+
+Task<void> run_cancel_and_join_group(
+    Scheduler scheduler,
+    bool& cancelled,
+    bool& stopRequested) {
+    TaskGroup group {};
+    const auto token = group.get_stop_token();
+    group.spawn(observe_cancellation(scheduler, token, cancelled));
+    co_await group.cancel_and_join();
+    stopRequested = token.stop_requested();
+}
+
 TEST(CmpTaskGroupTest, EmptyGroupJoinsAndTypeIsImmovable) {
     static_assert(!std::copy_constructible<TaskGroup>);
     static_assert(!std::move_constructible<TaskGroup>);
@@ -300,18 +339,18 @@ TEST(CmpTaskGroupTest, SupportsConcurrentAdmission) {
     EXPECT_EQ(completed.load(), THREAD_COUNT * TASKS_PER_THREAD);
 }
 
-TEST(CmpTaskGroupTest, RejectsAdmissionAfterJoinStartsAndRepeatedUse) {
+TEST(CmpTaskGroupTest, AllowsRecursiveAdmissionUntilJoinReachesQuiescence) {
     RunLoop loop {};
-    bool rejected { false };
+    bool admitted { false };
     bool candidateStarted { false };
 
-    loop.run(verify_join_closes_admission(
+    loop.run(verify_join_allows_recursive_admission(
         loop.get_scheduler(),
-        rejected,
+        admitted,
         candidateStarted));
 
-    EXPECT_TRUE(rejected);
-    EXPECT_FALSE(candidateStarted);
+    EXPECT_TRUE(admitted);
+    EXPECT_TRUE(candidateStarted);
 
     TaskGroup group {};
     loop.run(group.join());
@@ -322,6 +361,17 @@ TEST(CmpTaskGroupTest, RejectsAdmissionAfterJoinStartsAndRepeatedUse) {
         std::logic_error);
     EXPECT_EQ(liveCount, 0);
     EXPECT_THROW(loop.run(group.join()), std::logic_error);
+}
+
+TEST(CmpTaskGroupTest, RecursiveAdmissionDoesNotGrowTheNativeStack) {
+    constexpr int TASK_COUNT { 20'000 };
+    RunLoop loop {};
+
+    EXPECT_EQ(
+        loop.run(run_recursive_group(
+            loop.get_scheduler(),
+            TASK_COUNT)),
+        TASK_COUNT);
 }
 
 TEST(CmpTaskGroupTest, WaitsForAllAndRethrowsFirstExceptionByAdmissionOrder) {
@@ -359,6 +409,20 @@ TEST(CmpTaskGroupTest, StopTokenReachesExistingAndFutureChildren) {
     EXPECT_TRUE(secondCancelled);
     EXPECT_TRUE(firstRequestWon);
     EXPECT_FALSE(secondRequestWon);
+}
+
+TEST(CmpTaskGroupTest, CancelAndJoinRequestsStopBeforeWaiting) {
+    RunLoop loop {};
+    bool cancelled { false };
+    bool stopRequested { false };
+
+    loop.run(run_cancel_and_join_group(
+        loop.get_scheduler(),
+        cancelled,
+        stopRequested));
+
+    EXPECT_TRUE(cancelled);
+    EXPECT_TRUE(stopRequested);
 }
 
 TEST(CmpTaskGroupTest, PublishesCrossThreadCompletion) {

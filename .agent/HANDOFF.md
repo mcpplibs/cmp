@@ -2,217 +2,129 @@
 
 ## 项目概览
 
-CMP 是使用 mcpp 构建的 C++23 Modules 协程运行时库。当前公开核心包括惰性、唯一所有权的
-`Task<T>`，支持变参与同类型动态集合的结构化 `when_all()`，eager 可变结构化 `TaskGroup`，
-无分配一次性 `OneShotEvent`、RAII `AsyncMutex`，单消费者 `RunLoop`，以及可复制的
-`RunLoop::Scheduler`。Scheduler 支持普通
-`schedule()`、相对期限 `schedule_after()` 和绝对期限 `schedule_at()`；定时等待可显式接收
-`std::stop_token`，取消获胜时抛出 `OperationCancelled`。由 Scheduler 入队的 continuation
-均由调用 `RunLoop::run()` 的线程恢复。
+CMP 是使用 mcpp 构建的 C++23 Modules 协程运行时库，公开模块为 `mcpplibs.cmp`。当前 v1
+核心包括：
 
-项目使用 `mcpplibs.cmp` 模块；`.xlings.json` 固定 mcpp 2026.8.11.2，`mcpp.toml` 固定
-LLVM 22.1.8，测试依赖为 `compat.gtest` 1.15.2。实现位于 `src/`，契约测试位于 `tests/`，
-`examples/basic` 是独立的 path-dependency 消费示例。
+- 懒启动、唯一所有权的 `Task<T>`；
+- 变参和 `std::vector` 结构化 `when_all()`；
+- eager、可递归接纳至静止点的 `TaskGroup`；
+- `OneShotEvent`、可取消的 `AsyncManualResetEvent`、RAII `AsyncMutex`；
+- 单消费者 `RunLoop` 及可复制 `Scheduler`；
+- 普通、相对期限、绝对期限调度，以及显式 `std::stop_token` 协作式取消。
+
+`.xlings.json` 固定 mcpp 2026.8.11.2，工具链解析为 LLVM 22.1.8，测试依赖是
+`compat.gtest` 1.15.2。`examples/basic` 是独立 path-dependency consumer。
 
 ## 当前目标与状态
 
-当前分支为 `main`，已与远端同步到 `7b13ddc`。AsyncMutex v1 的设计、实现、5 项契约测试、
-独立示例和三语文档均已完成；PR #9 及其 squash 合并提交的 Linux、macOS、Windows CI 全部
-通过，当前模块已交付。本阶段完成后读取的本机时间为 2026-08-24 03:07:04 CST，已进入用户
-指定的 03:00–04:00 停止窗口，本轮连续开发目标到此完成。
+用户要求补齐第四阶段，增加成功/失败/竞态测试，并对计算、文件 I/O、网络 I/O 做压力验证，
+确认 CMP v1 可用于开发。
 
-## 已完成工作
+第四阶段实现、测试、示例和本机压测已经完成，交付前最终一致性检查已通过。Git 交付分支为
+`feature/phase4-v1-readiness`；用户已明确授权提交并推送本阶段全部内容（包括压测），但没有
+授权创建 PR 或合并。
 
-- 导出 `OperationCancelled`，并为相对、绝对定时等待增加 `std::stop_token` 重载；原有无 token
-  重载保持不变。
-- 使用标准 `std::vector` 堆替换私有 `std::priority_queue`，保留普通 Timer 的 O(log n)
-  插入和到期路径。
-- 在 awaiter 协程帧内保存最小取消状态，以同步 stop callback 构造竞态、deadline 和取消终态。
-- stop callback 只在 RunLoop 互斥量下标记取消、重排 Timer 并通知，不向 ready 队列分配，
-  不在 `request_stop()` 线程 inline 恢复用户协程。
-- deadline 和取消只有一个终态；已经进入 ready 队列的 deadline 完成不会被较晚停止请求替换。
-- 增加预取消、跨线程、RunLoop 线程、非最早 Timer、晚取消、竞态恰好一次、无效 Scheduler、
-  无 stop-state token、清理复用和十万次预取消栈安全等测试。
-- 独立示例现在从协程内依次打印正常定时、并发汇合和取消结果。
-- 已同步 README、架构说明、设计文档和实施计划的英文、简体中文、繁体中文事实。
-- 已完成 `when_all` v1 设计：输入 Task 由汇合 awaiter 结构化持有，全部结束后按参数顺序
-  返回结果或抛出第一个异常；`void` 映射为 `std::monostate`。
-- 已导出 variadic `when_all(Task<Results>...)`；支持零输入、异构与 move-only 结果、void
-  占位、同步完成和跨线程完成。
-- 新增 8 项汇合契约测试、10 万次同步汇合栈安全压力，以及独立 consumer 的并发结果打印。
-- README 与架构说明的英文、简体中文、繁体中文事实已同步到 `when_all` v1。
-- 已导出 `when_all(std::vector<Task<T>>)`；支持空集合、move-only 与 void 结果、按索引保序、
-  全部收尾后按索引传播首个异常，以及同步和跨线程完成。
-- 范围 awaiter 复用现有 `JoinTask` / `JoinCounter`，在任何子任务启动前预留全部 wrapper 空间，
-  不增加依赖、任意 range 抽象或公开生命周期接口。
-- 新增 7 项动态集合契约测试和 5 万次立即汇合栈安全压力；独立示例改为在协程内构造并汇合
-  `std::vector<Task<int>>`。
-- README、架构说明、设计文档和实施计划已同步动态集合 API 与 53 项测试基线。
-- 已导出不可移动的 `TaskGroup`；`spawn(Task<void>)` 接管并 eager 启动子任务，单次 `join()`
-  关闭接纳、等待全部终态，再按接纳顺序传播第一个异常。
-- TaskGroup 使用一个 mutex 保护状态、计数、wrapper 存储和 join continuation；最后一个子任务
-  在锁外通过对称转移恢复 join，不引入后台线程或 detached 生命周期。
-- TaskGroup 直接复用 `std::stop_source` / `std::stop_token` 提供显式共享取消通道，不自动向
-  Task 注入 token。
-- 新增 9 项 TaskGroup 契约测试，覆盖 eager/lazy 边界、并发接纳、join 后关闭、异常顺序、
-  取消、跨线程发布和 5 万次即时完成栈安全。
-- 独立示例和英文、简体中文、繁体中文 README / 架构文档已同步 TaskGroup v1。
-- 已导出不可移动的 `OneShotEvent`；`co_await event` 无分配注册等待者，首次 `set()` 永久设置
-  事件并在 setter 线程恢复全部等待者，后续 set 幂等。
-- event 使用一个原子 sentinel/list 状态和协程帧内侵入节点，注册/set 竞态不会丢失唤醒；
-  acquire-release 顺序发布 set 前写入。
-- 新增 7 项事件契约测试，覆盖预先 set、多个等待者、setter 线程、1,000 次注册竞态、显式
-  返回 RunLoop 和 5 万等待者栈安全。
-- 已导出不可移动的 `AsyncMutex`；`lock_async()` 无分配返回 move-only RAII Guard，竞争等待者
-  按 FIFO 顺序交接，ownership 不绑定线程。
-- 一个标准 mutex 保护 locked/head/tail；无分配 thread-local trampoline 将立即释放形成的嵌套
-  resume 展平成循环，5 万次竞争交接不增长原生栈。
-- 新增 5 项 AsyncMutex 契约测试，覆盖 Guard move、异常释放、FIFO、跨线程 ownership 和栈安全。
+## 本阶段实现
 
-## 重要决策
+### TaskGroup 静止点 join
 
-- 直接复用 `std::stop_source`、`std::stop_token` 和 `std::stop_callback`，不自造 token/source。
-- 仅定时等待增加 token 重载；普通 `schedule()`、Task 隐式传播和结构化并发不属于 v1。
-- token 重载即使收到预先请求停止的 token 也始终挂起，并通过 RunLoop 队列恢复。
-- 取消通过现有 Task 异常路径传播；调用方可以在协程内捕获 `OperationCancelled`。
-- Timer entry 只增加一个非 owning 取消状态指针；外部销毁已发布协程帧仍属于无效使用。
-- 取消当前用 O(n) 扫描并重建堆；只有实测为瓶颈后才引入可删除或带索引的堆。
-- 不增加后台线程、依赖、公开 Timer 句柄、detached 或测试专用公共接口。
-- `when_all` v1 使用“子任务数 + 1”原子计数哨兵，覆盖同步完成和跨线程完成竞态。
-- `when_all` 等待全部子任务收尾后再传播异常，不允许因 fail-fast 提前销毁仍在运行的帧。
-- `when_all` 负责一次性结果汇合；TaskGroup v1 只接纳 `Task<void>`，需要结果时继续使用
-  `when_all()` 或由调用方持有至 join 结束的状态。
-- 范围阶段只接受标准 `std::vector<Task<T>>`，不为尚无需求的任意 range 增加模板层。
-- TaskGroup 的 join 仅能使用一次；join 开始后不允许继续或递归接纳，未 join 的 open/joining
-  group 在析构时终止进程，避免销毁仍被发布的子协程帧。
-- TaskGroup 取消保持显式：`request_stop()` 不会自动取消不接收 token 的子任务，也不提供
-  `cancel_and_join()`、结果 future、scheduler 选择或 completed-wrapper 回收。
-- OneShotEvent 只有单向 unset→set 状态，不提供 reset、代际、取消注销、值或隐式 Scheduler
-  转移；需要复用事件或 channel 时再设计独立状态机。
-- AsyncMutex v1 只暴露 RAII acquisition，不提供手工 unlock、try-lock、取消注销、递归锁或
-  scheduler 选择；只有基准证明短状态锁成为瓶颈后才考虑原子双队列。
+- `join()` 等待活动计数归零，不再在开始等待时立即关闭接纳。
+- 已经属于 group 的活动子任务可在 join 等待期间继续 `spawn()`；静止点到达后永久关闭。
+- 外部线程与最后完成瞬间竞态接纳时不保证哪方获胜；join 后接纳抛出 `std::logic_error`。
+- 新增 lazy `cancel_and_join()`：真正被等待时先 `request_stop()`，再执行同一个单次 join。
 
-## 修改 / 重要文件
+### 更广泛的显式取消
 
-- `src/run_loop.cppm`：公开异常、token 重载、取消状态、回调和显式 Timer 堆。
-- `src/when_all.cppm`：join coroutine、原子计数哨兵和 variadic/vector 公开 API。
-- `src/task_group.cppm`：eager void 子任务作用域、单次 join、显式 stop 通道和生命周期状态机。
-- `src/one_shot_event.cppm`：无分配一次性事件和原子等待者链表。
-- `src/async_mutex.cppm`：RAII Guard、FIFO 等待队列和栈安全交接 trampoline。
-- `src/cmp.cppm`：导出 `:when_all`、`:task_group`、`:one_shot_event` 与 `:async_mutex` 分区。
-- `tests/run_loop_test.cpp`：Cancellation v1 契约、边界、竞态和栈安全测试。
-- `tests/when_all_test.cpp`：变参/vector 的结构化所有权、结果、异常、线程和栈安全测试。
-- `tests/task_group_test.cpp`：TaskGroup 接纳、join、异常、取消、线程和栈安全测试。
-- `tests/one_shot_event_test.cpp`：事件发布、注册竞态、线程和栈安全测试。
-- `tests/async_mutex_test.cpp`：Guard、FIFO、异常、跨线程和交接栈安全测试。
-- `examples/basic/src/main.cpp`：协程内正常、并发、TaskGroup、event、mutex 和预取消输出示例。
-- `README.md`、`README.zh.md`、`README.zh.hant.md`：当前 API、示例和路线图。
-- `docs/architecture.md`、`docs/architecture.zh.md`、`docs/architecture.zh.hant.md`：实现契约、
-  边界与验证基线。
-- `docs/superpowers/specs/2026-08-23-cmp-cancellation-v1-design.md`：已实现设计。
-- `docs/superpowers/plans/2026-08-23-cmp-cancellation-v1.md`：已完成实施清单和本地结果。
-- `docs/superpowers/specs/2026-08-24-cmp-when-all-v1-design.md`：当前汇合 API 设计。
-- `docs/superpowers/plans/2026-08-24-cmp-when-all-v1.md`：当前实施与交付清单。
-- `docs/superpowers/specs/2026-08-24-cmp-when-all-range-design.md`：当前动态集合设计。
-- `docs/superpowers/plans/2026-08-24-cmp-when-all-range.md`：当前动态集合实施清单。
-- `docs/superpowers/specs/2026-08-24-cmp-task-group-v1-design.md`：当前 TaskGroup v1 设计。
-- `docs/superpowers/plans/2026-08-24-cmp-task-group-v1.md`：当前 TaskGroup v1 实施清单。
-- `docs/superpowers/specs/2026-08-24-cmp-one-shot-event-v1-design.md`：当前 OneShotEvent v1 设计。
-- `docs/superpowers/plans/2026-08-24-cmp-one-shot-event-v1.md`：当前 OneShotEvent v1 实施清单。
-- `docs/superpowers/specs/2026-08-24-cmp-async-mutex-v1-design.md`：当前 AsyncMutex v1 设计。
-- `docs/superpowers/plans/2026-08-24-cmp-async-mutex-v1.md`：当前 AsyncMutex v1 实施清单。
-- `.agent/HANDOFF.md`：本文件。
+- `OperationCancelled` 移到独立 `:cancellation` 分区。
+- 新增 `Scheduler::schedule(std::stop_token)`；预取消也先排队，消费前取消获胜则抛出异常。
+- ready 与 timer 共用取消状态和 stop callback 协议；终态在 RunLoop 状态锁下确定，避免双恢复。
+- 普通调度和定时调度的取消查找仍为 O(n)，只有压测证明瓶颈后才升级数据结构。
 
-## 验证情况
+### AsyncManualResetEvent
 
-- 新测试先因缺少 `OperationCancelled` 和 token 重载按预期编译失败，完成实现后转绿。
-- Dev 严格无缓存构建通过，完整测试 38/38（8 个 Task、30 个 RunLoop）。
-- Cancellation v1 合并前的 Release 严格无缓存构建通过，完整测试 38/38。
-- Release 的完整 RunLoop 30 项套件额外连续执行 10 次，全部通过；未见双恢复、死锁或丢唤醒。
-- `examples/basic` 的 `mcpp run` 状态为 0，依次输出 `Coroutine result: 42` 和
-  `Concurrent result: 42`、`Coroutine cancelled`。
-- 功能提交 `3a997ab` 的 Linux x86_64、macOS arm64、Windows x86_64 手动 CI 均通过构建、
-  38 项测试和独立示例。
-- PR #4 最终 head `67d0efc` 的三平台检查全部通过；合并提交 `ad80fb0` 触发的 `main` 三平台
-  CI 也全部通过。
-- mcpp 仍提示本机 SubOS 缺少 `subos_info`，但工具链解析为 LLVM 22.1.8，未影响构建或运行。
-- 已按用户授权提交、推送、创建 PR #4 并 squash 合并；未删除远端功能分支或修改其他远端
-  资源。
-- 新测试先因缺少 `when_all` 导出按预期编译失败；实现后聚焦测试 8/8 通过。
-- Dev 与 Release 严格无缓存构建通过；两个 profile 的完整测试均为 46/46（8 个 Task、
-  30 个 RunLoop、8 个 when_all）。
-- Release 的完整 `when_all` 8 项套件额外连续执行 50 次，全部通过。
-- 更新后的独立示例构建运行通过并输出三行预期结果。
-- PR #5 head `d6ea2a8` 的 Linux x86_64、macOS arm64、Windows x86_64 CI 均通过构建、
-  46 项测试和独立示例；已 squash 合并为 `d7dd418`。
-- vector 新测试先因缺少匹配重载按预期编译失败；实现后聚焦测试 15/15 通过。
-- Dev 与 Release 严格无缓存构建通过；两个 profile 的完整测试均为 53/53（8 个 Task、
-  30 个 RunLoop、15 个 when_all）。
-- Release 的完整 `when_all` 15 项套件额外连续执行 50 次，全部通过。
-- 动态集合独立示例运行通过，依次输出 `Coroutine result: 42`、`Concurrent result: 42` 和
-  `Coroutine cancelled`。
-- 本阶段本地验证完成于 2026-08-24 01:27:08 CST；远端三平台 CI 尚待提交与 PR 后验证。
-- PR #6 首轮 macOS 在 vector 跨线程测试中以 exit 139 失败；根因是测试辅助 awaiter 启动
-  新线程后才读取自身 `worker_` 成员，新线程可能先恢复并销毁 awaiter。修复为发布前把指针
-  复制到当前栈；库公开实现未因此改变，三平台复验待新提交触发。
-- 竞态修复后的 Dev/Release 聚焦套件均为 15/15；两个跨线程汇合测试在本机 Release 下额外
-  连续执行 5,000 轮全部通过。
-- PR #6 最终 head `ee378aa` 的 Linux x86_64、macOS arm64、Windows x86_64 CI 均通过构建、
-  53 项测试和独立示例；已 squash 合并为 `5c202c8`，功能分支保留。
-- 本地与远端 `main` 已同步到交接提交 `4467ab0`；该提交的 Linux、macOS、Windows 最终 CI
-  均成功。
-- TaskGroup 新测试先因缺少公开类型按预期编译失败；实现后聚焦 Dev 测试 9/9 通过。
-- TaskGroup 阶段 Dev/Release 严格无缓存构建通过；两个 profile 的完整测试均为 62/62（8 个
-  Task、30 个 RunLoop、15 个 when_all、9 个 TaskGroup）。
-- Release 的完整 TaskGroup 套件额外连续执行 50 轮，跨线程完成测试 5,000 轮、并发接纳测试
-  1,000 轮，全部通过。
-- 更新后的独立示例运行成功，依次输出 `Coroutine result: 42`、`Concurrent result: 42`、
-  `Task group result: 42` 和 `Coroutine cancelled`。
-- TaskGroup v1 本地实现与验证阶段完成于 2026-08-24 02:14:36 CST。
-- PR #7 head `c074250` 的 Linux x86_64、macOS arm64、Windows x86_64 CI 均通过 62 项测试和
-  独立示例；已 squash 合并为 `c3883ab`，功能分支保留。
-- 本地与远端 `main` 已同步到交接提交 `a9183fc`；该提交的 Linux run `32657710516`、Windows
-  run `32657710523`、macOS run `32657710496` 均成功。
-- OneShotEvent 新测试先因缺少公开类型按预期编译失败；实现后聚焦 Dev 测试 7/7 通过。
-- 更新后的独立示例运行成功，并在取消输出前增加 `Event signalled`。
-- OneShotEvent 阶段 Dev/Release 严格无缓存构建通过；两个 profile 的完整测试均为 69/69。
-- Release 的完整事件套件额外连续执行 50 轮，覆盖 50,000 次注册/set 竞态；跨线程恢复测试
-  额外连续执行 5,000 轮，全部通过。
-- OneShotEvent v1 本地实现与验证阶段完成于 2026-08-24 02:37:41 CST。
-- PR #8 head `02efa37` 的 Linux x86_64、macOS arm64、Windows x86_64 CI 均通过 69 项测试和
-  独立示例；已 squash 合并为 `26ae032`，功能分支保留。
-- 本地与远端 `main` 已同步到交接提交 `f8ae3e5`；该提交的 Linux run `32658884971`、macOS
-  run `32658884957`、Windows run `32658884967` 均成功。
-- AsyncMutex 新测试先因缺少公开类型按预期编译失败；实现后聚焦 Dev 测试 5/5 通过。
-- AsyncMutex 阶段 Dev/Release 严格无缓存构建通过；两个 profile 的完整测试均为 74/74。
-- Release 的完整 mutex 套件额外连续执行 50 轮，跨线程 ownership 测试 5,000 轮，全部通过。
-- 更新后的独立示例运行成功，并在取消输出前增加 `Mutex result: 42`。
-- PR #9 head `6fa1bf3` 的 Linux run `32659868054`、macOS run `32659868121`、Windows run
-  `32659868088` 均成功；已 squash 合并为 `7b13ddc`，功能分支保留。
-- 合并提交 `7b13ddc` 的 Linux run `32660022056`、macOS run `32660022046`、Windows run
-  `32660022050` 均成功，本地 `main` 已同步。
+- 新增不可移动、无 waiter 分配的 `AsyncManualResetEvent`。
+- 支持初始状态、`is_set()`、`set()`、`reset()`、`wait(stop_token)` 和 `co_await event`。
+- pending 等待者按 FIFO 恢复；双向侵入队列支持 O(1) 取消移除。
+- set/cancel 竞态只有一个终态；预取消确定由取消获胜。
+- setter 或取消请求线程直接恢复等待者；thread-local trampoline 保证嵌套唤醒不增长原生栈。
+- 带 pending 等待者析构会终止，事件必须比等待协程帧活得更久。
 
-## 已知问题 / 风险
+## 测试与压测
 
-- 三套 Actions 均提示 `actions/checkout@v4` 的 Node.js 20 已弃用并被强制使用 Node.js 24；
-  当前不影响 CI 结果，workflow 升级应作为后续独立修改。
-- 取消定位为 O(n)，适合当前最小实现；大量并发取消的性能上限尚未基准测试。
-- 外部销毁已经发布到 RunLoop 的协程帧仍不受支持；Cancellation v1 不提供 detached 安全。
-- 取消只覆盖 Scheduler 定时等待，不会中断阻塞调用，也不会自动传播到任意子 Task 或外部
-  awaiter。
-- pending `when_all`（包括 vector 重载）仍遵循现有 Task 边界：子任务发布 continuation 后，外部提前销毁聚合
-  帧属于无效使用。
-- TaskGroup 会保留所有 wrapper 帧至析构，空间复杂度为 O(n)；v1 不为尚无实测需求增加完成后
-  回收机制。
-- TaskGroup 遗漏 join 会确定性终止，且取消不会自动注入子任务；这两项均是已记录的公开契约。
-- OneShotEvent 会在带 pending 等待者析构时终止；等待者帧必须存活到 set，v1 不提供取消注销。
-- AsyncMutex 会在仍持有或有 pending 等待者时析构终止；排队协程帧必须存活到取得 Guard。
+- 全量套件现为 7 个测试二进制、90 项测试。
+- 新增/扩展测试覆盖正常、预取消、晚取消、跨线程、异常、拒绝、静止点、递归接纳、FIFO、
+  publication、set/cancel 竞态、生命周期和原生栈安全。
+- `AsyncManualResetEvent` 10 项套件在 Release 下连续 30 轮通过；每轮包含 1,000 次 set/cancel
+  竞态、50,000 个等待者和 20,000 个嵌套信号。
+- RunLoop 三项关键取消竞态在 Release 下连续 100 轮通过。
+- TaskGroup 四项递归、并发和取消关键用例在 Release 下连续 100 轮通过。
+- 最终文件状态下，Dev / Release `--strict --cache=off` 构建均通过；两个 profile 的全量
+  测试均为 90/90，7 个测试二进制、0 失败。
+
+独立 POSIX Release 压测位于 `benchmarks/v1-readiness`。五轮均为 PASS：
+
+| 场景 | 每轮成功 | 每轮预期失败 | 每轮非预期失败 | 中位耗时 | 中位吞吐 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| compute | 49,000 | 1,000 | 0 | 28.172 ms | 1,774,824.8 ops/s |
+| file_io | 1,000 | 100 | 0 | 185.222 ms | 5,938.8 ops/s |
+| network_loopback | 20,000 | 100 | 0 | 2,455.883 ms | 8,184.4 ops/s |
+
+原始五轮数据、环境、命令和边界见
+`docs/benchmarks/2026-08-29-cmp-v1-readiness.md`。文件和网络工作由外部 `std::jthread`
+适配，再通过事件和 Scheduler 返回 RunLoop；这验证 v1 互操作及生命周期，不宣称原生异步
+I/O 性能。
+
+## 示例输出
+
+`examples/basic` 已运行成功，输出：
+
+```text
+Coroutine result: 42
+Concurrent result: 42
+Task group result: 42
+Recursive group result: 3
+Event signalled
+Reusable event cycles: 2
+Mutex result: 42
+Coroutine cancelled
+```
+
+## 本阶段重要文件
+
+- `src/cancellation.cppm`
+- `src/run_loop.cppm`
+- `src/task_group.cppm`
+- `src/async_manual_reset_event.cppm`
+- `src/cmp.cppm`
+- `tests/run_loop_test.cpp`
+- `tests/task_group_test.cpp`
+- `tests/async_manual_reset_event_test.cpp`
+- `examples/basic/src/main.cpp`
+- `benchmarks/v1-readiness/mcpp.toml`
+- `benchmarks/v1-readiness/src/main.cpp`
+- `docs/benchmarks/2026-08-29-cmp-v1-readiness.md`
+- `docs/superpowers/specs/2026-08-29-cmp-phase4-v1-completion-design.md`
+- `docs/superpowers/plans/2026-08-29-cmp-phase4-v1-completion.md`
+- 三份 README、三份架构说明和本文件。
+
+## 已知边界与风险
+
+- v1 没有原生异步 I/O、blocking pool、多 worker 调度、work stealing 或 detached 所有权。
+- 阻塞调用仍会阻塞其所在执行线程；当前 I/O consumer 使用外部线程适配。
+- 压测的 socket 实现仅支持 POSIX，不进入 Windows/macOS/Linux 通用 CI；库和根测试仍是跨平台目标。
+- Scheduler 大量并发取消时 O(n) 查找可能成为瓶颈，目前没有数据要求升级。
+- TaskGroup 保留 wrapper 帧至析构，空间复杂度 O(n)；外部接纳与最终静止点竞态不提供保证。
+- AsyncManualResetEvent 在 set/cancel 调用线程恢复，不隐式保证 RunLoop 亲和；开发者需显式
+  `co_await scheduler.schedule()` 返回目标循环。
+- 本机 mcpp 仍提示 SubOS 缺少 `subos_info`；工具链解析和本次构建、测试、运行未受影响。
+- 当前已完成本机验证，尚未进行 PR 三平台 CI 验证。
 
 ## 剩余工作
 
-当前连续开发目标无剩余模块工作；不要在本轮继续设计或实现下一模块。
+本地实现与验证没有剩余项。本阶段 Git 交付以 `feature/phase4-v1-readiness` 上的第四阶段
+提交为边界；PR、合并和对应三平台 CI 仍需用户另行决定。
 
 ## 推荐下一步
 
-后续会话如要继续开发，先重新读取本文件、路线图和本机时间，再由同步后的 `main` 创建新
-分支；不要向 AsyncMutex v1 追加手工 unlock、取消注销或 lock-free 双队列。
+确认功能分支远端同步后，由用户决定是否创建 PR 并进行三平台 CI。第四阶段合并后，再单独
+设计第五阶段多 worker 调度，不把第六阶段 I/O 后端提前混入。

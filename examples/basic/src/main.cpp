@@ -9,6 +9,7 @@ using mcpplibs::cmp::OperationCancelled;
 using mcpplibs::cmp::OneShotEvent;
 using mcpplibs::cmp::TaskGroup;
 using mcpplibs::cmp::ThreadPool;
+using mcpplibs::cmp::run_blocking;
 using mcpplibs::cmp::when_all;
 
 using namespace std::chrono_literals;
@@ -60,6 +61,19 @@ Task<void> print_worker_result(
     RunLoop::Scheduler caller) {
     const auto result = co_await calculate_on_workers(workers, caller);
     std::println("Worker pool result: {}", result);
+}
+
+Task<void> print_blocking_result(
+    ThreadPool::Scheduler blockingWorkers,
+    RunLoop::Scheduler caller) {
+    const auto result = co_await run_blocking(
+        blockingWorkers,
+        caller,
+        [] {
+            std::this_thread::sleep_for(1ms);
+            return 42;
+        });
+    std::println("Blocking result: {}", result);
 }
 
 Task<void> add_delayed(
@@ -201,11 +215,15 @@ Task<void> print_cancellation(RunLoop::Scheduler scheduler) {
 
 int main() {
     ThreadPool workers { 2 };
+    ThreadPool blockingWorkers { 2 };
     RunLoop loop {};
     loop.run(print_answer(loop.get_scheduler()));
     loop.run(print_concurrent_results(loop.get_scheduler()));
     loop.run(print_worker_result(
         workers.get_scheduler(),
+        loop.get_scheduler()));
+    loop.run(print_blocking_result(
+        blockingWorkers.get_scheduler(),
         loop.get_scheduler()));
     loop.run(print_task_group(loop.get_scheduler()));
     loop.run(print_recursive_group(loop.get_scheduler()));

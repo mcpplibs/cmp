@@ -21,12 +21,14 @@
 > CMP 已提供延遲啟動、單一消費者的 `Task<T>` / `Task<void>`、支援變參和 vector 的結構化
 > `when_all()`、eager 結構化 `TaskGroup`、一次性與可複用事件、RAII `AsyncMutex`，以及在呼叫
 > 執行緒運行、支援明確排程和單調時鐘定時排程的 `RunLoop`，以及固定大小的 CPU
-> `ThreadPool`。兩種執行器的就緒排程、定時等待、可複用事件等待和 TaskGroup 子任務可明確
-> 使用基於 `std::stop_token` 的協作式取消；非同步 I/O 和 detached 執行尚未實作。
+> `ThreadPool`。`run_blocking()` 可在專用的 pool 實例上執行同步 callable，並透過明確的
+> 返回 Scheduler 交付結果。兩種執行器的就緒排程、定時等待、可複用事件等待、TaskGroup
+> 子任務和排隊中的阻塞 offload 可明確使用基於 `std::stop_token` 的協作式取消；原生非同步
+> I/O 和 detached 執行尚未實作。
 
 CMP 計畫以標準無堆疊 C++ 協程建構現代協程執行期與函式庫。明確的 `co_await` 模型現已
-涵蓋固定與增量結構化並行、一次性事件通知、呼叫執行緒與多 worker 排程、單調時鐘計時器和
-可取消等待，並將透過經過驗證的小步驟繼續探索非同步 I/O，以及阻塞工作的安全隔離。
+涵蓋固定與增量結構化並行、一次性事件通知、呼叫執行緒與多 worker 排程、單調時鐘計時器、
+可取消等待和阻塞工作的結構化隔離。原生非同步 I/O 仍是獨立的增量設計步驟。
 
 ## 為什麼叫 CMP？
 
@@ -51,8 +53,8 @@ C++ 標準協程是語言機制，不是完整執行期。因此 CMP 不會宣�
 - 可以直接在訊號處理器中安全切換協程；
 - task 會隱式遷移、work stealing 已啟用，或任意非同步 I/O 已經實作。
 
-這些能力必須分別設計和驗證。預期方向是明確的非同步 I/O awaiter、專用 blocking pool
-以及協作式安全點。
+這些能力必須分別設計和驗證。CMP 目前透過明確的專用 `ThreadPool` 實例和
+`run_blocking()` 隔離同步工作；原生非同步 I/O awaiter 與協作式安全點仍需單獨設計。
 
 ## 快速開始
 
@@ -73,8 +75,9 @@ cd examples/basic
 mcpp run
 ```
 
-範例會印出 `Coroutine result: 42`、`Concurrent result: 42`、`Worker pool result: 42`、`Task group result: 42` 和
-`Recursive group result: 3`，接著透過 `Event signalled` 與 `Reusable event cycles: 2`
+範例會印出 `Coroutine result: 42`、`Concurrent result: 42`、`Worker pool result: 42`、
+`Blocking result: 42`、`Task group result: 42` 和 `Recursive group result: 3`，接著透過
+`Event signalled` 與 `Reusable event cycles: 2`
 展示一次性及可複用通知，再印出 `Mutex result: 42` 和 `Coroutine cancelled`；所有輸出都在
 `Task<void>` 協程內部。
 
@@ -91,6 +94,7 @@ using mcpplibs::cmp::OperationCancelled;
 using mcpplibs::cmp::OneShotEvent;
 using mcpplibs::cmp::TaskGroup;
 using mcpplibs::cmp::ThreadPool;
+using mcpplibs::cmp::run_blocking;
 using mcpplibs::cmp::when_all;
 
 using namespace std::chrono_literals;
@@ -137,6 +141,20 @@ Task<void> print_worker_result(
     RunLoop::Scheduler caller) {
     const auto result = co_await calculate_on_workers(workers, caller);
     std::println("Worker pool result: {}", result);
+    co_return;
+}
+
+Task<void> print_blocking_result(
+    ThreadPool::Scheduler blockingWorkers,
+    RunLoop::Scheduler caller) {
+    const auto result = co_await run_blocking(
+        blockingWorkers,
+        caller,
+        [] {
+            std::this_thread::sleep_for(1ms);
+            return 42;
+        });
+    std::println("Blocking result: {}", result);
     co_return;
 }
 
@@ -209,11 +227,15 @@ Task<void> print_cancellation(RunLoop::Scheduler scheduler, std::stop_token toke
 
 int main() {
     ThreadPool workers { 2 };
+    ThreadPool blockingWorkers { 2 };
     RunLoop loop {};
     loop.run(print_answer(loop.get_scheduler()));
     loop.run(print_concurrent_results(loop.get_scheduler()));
     loop.run(print_worker_result(
         workers.get_scheduler(),
+        loop.get_scheduler()));
+    loop.run(print_blocking_result(
+        blockingWorkers.get_scheduler(),
         loop.get_scheduler()));
     loop.run(print_task_group(loop.get_scheduler()));
     loop.run(print_event(loop.get_scheduler()));
@@ -276,6 +298,12 @@ set 不做任何事。事件不可移動且必須比等待者活得更久；v1 �
 work-conserving 共用 FIFO 和休眠 worker；解構關閉接納、排空全部已接納項並 join worker。
 ThreadPool 不擁有上層 Task，阻塞呼叫仍會阻塞目前 worker。
 
+`run_blocking(blockingWorkers, returnTo, operation, stopToken)` 在其延遲 Task 框架中持有同步
+callable，將它排程到指定 ThreadPool 恰好執行一次，並在透過 `returnTo` 排程回來後交付值、
+`void`、例外或排隊取消。應使用獨立的 ThreadPool 實例隔離阻塞工作，避免佔用延遲敏感的 CPU
+worker。停止要求可以跳過尚未被 worker 領取的工作，但不能搶佔已經執行的同步呼叫；返回排程
+刻意不可取消。這是基於執行緒的隔離，不是原生非阻塞 I/O。
+
 RunLoop 不是背景執行緒，也不會把阻塞程式碼自動變成非同步程式碼。如果 Task 暫停後沒有
 安排未來的恢復動作，`run()` 可能一直等待。CMP 不提供隱式執行緒親和：外部 awaiter 在其他
 執行緒恢復協程後，需要明確等待目標 Scheduler 才會返回對應 RunLoop。
@@ -291,6 +319,7 @@ RunLoop 不是背景執行緒，也不會把阻塞程式碼自動變成非同步
 ├── src/cancellation.cppm          # 共用的協作式取消例外
 ├── src/run_loop.cppm              # RunLoop 與 Scheduler 分割區
 ├── src/thread_pool.cppm            # 固定大小的 CPU worker 排程器
+├── src/blocking.cppm               # 結構化阻塞呼叫 offload
 ├── src/when_all.cppm              # 結構化並行 Task 匯合
 ├── src/task_group.cppm             # eager 可變結構化 Task 作用域
 ├── src/one_shot_event.cppm         # 無分配一次性通知
@@ -299,6 +328,7 @@ RunLoop 不是背景執行緒，也不會把阻塞程式碼自動變成非同步
 ├── tests/cmp_test.cpp             # Task 契約和生命週期測試
 ├── tests/run_loop_test.cpp        # 排程、邊界和執行緒測試
 ├── tests/thread_pool_test.cpp      # worker、取消和關閉測試
+├── tests/blocking_test.cpp         # 阻塞 offload、執行緒親和和取消測試
 ├── tests/when_all_test.cpp        # 匯合所有權、結果和競態測試
 ├── tests/task_group_test.cpp       # 可變作用域生命週期和競態測試
 ├── tests/one_shot_event_test.cpp   # 事件發布和競態測試
@@ -330,7 +360,7 @@ CI 在 Linux、macOS 和 Windows 上執行等價的建構、測試與獨立範�
 
 CMP 目前不追蹤 `mcpp.lock`，`.gitignore` 明確執行這項儲存庫約定。執行期相依放在
 `[dependencies]`，gtest 明確宣告在 `[dev-dependencies.compat]` 中。
-目前本機套件包含 8 個測試二進位檔、105 項測試。僅用於 POSIX 的 Release 壓測 consumer 及其
+目前本機套件包含 9 個測試二進位檔、116 項測試。僅用於 POSIX 的 Release 壓測 consumer 及其
 成功/失敗資料記錄在 [v1 可開發性壓測](docs/benchmarks/2026-08-29-cmp-v1-readiness.md)。
 多 worker 正確性和效能資料記錄在[執行緒池壓測](docs/benchmarks/2026-08-29-cmp-thread-pool.md)。
 
@@ -344,7 +374,7 @@ CMP 目前不追蹤 `mcpp.lock`，`.gitignore` 明確執行這項儲存庫約定
 4. 單調時鐘 Timer v1、可取消就緒/定時等待、變參/vector 匯合、靜止點 TaskGroup、
    OneShotEvent、AsyncManualResetEvent 和 AsyncMutex——已實作並完成壓力驗證；
 5. 固定大小的多 worker 排程——已實作並完成壓測；work stealing 仍需 profiling 證據；
-6. 非同步 I/O 整合和 blocking pool。
+6. 結構化阻塞 offload——已實作；原生非同步 I/O 仍需單獨設計和驗證。
 
 剩餘順序只是方向，不代表列出的能力已經實作。
 

@@ -21,15 +21,17 @@
 > CMP provides a lazy, single-consumer `Task<T>` / `Task<void>`, structured variadic and vector
 > `when_all()`, an eager structured `TaskGroup`, one-shot and reusable events, an RAII `AsyncMutex`,
 > a caller-thread `RunLoop` with explicit and monotonic timed scheduling, and a fixed-size CPU
-> `ThreadPool`. Ready scheduling on either executor, timed waits, reusable-event waits, and
-> TaskGroup children can use explicit cooperative cancellation with `std::stop_token`;
-> asynchronous I/O and detached execution are not implemented.
+> `ThreadPool`. `run_blocking()` executes an owned synchronous callable on a dedicated pool instance
+> and delivers its outcome through an explicit return Scheduler. Ready scheduling on either
+> executor, timed waits, reusable-event waits, TaskGroup children, and queued blocking offloads can
+> use explicit cooperative cancellation with `std::stop_token`; native asynchronous I/O and
+> detached execution are not implemented.
 
 CMP is being built as a modern coroutine runtime and library on standard stackless C++
 coroutines. Its explicit `co_await` model now covers fixed and incremental structured concurrency,
 one-time event notification, caller-thread and multi-worker scheduling, monotonic timers, and
-cancellable waits and can grow, in small verified steps, toward asynchronous I/O and safe handling
-of blocking work.
+cancellable waits, plus structured isolation of blocking work. Native asynchronous I/O remains a
+separate, incremental design step.
 
 ## Why CMP?
 
@@ -56,8 +58,9 @@ promise that:
 - coroutine switching is safe directly inside a signal handler;
 - task migration is implicit, work stealing is already enabled, or arbitrary async I/O exists.
 
-Those capabilities must be designed and verified individually. The expected direction is
-explicit async I/O awaiters, a dedicated blocking pool, and cooperative safe points.
+Those capabilities must be designed and verified individually. CMP now uses an explicitly
+dedicated `ThreadPool` instance with `run_blocking()` for synchronous work; native async I/O awaiters
+and cooperative safe points remain separate work.
 
 ## Quick Start
 
@@ -79,9 +82,9 @@ mcpp run
 ```
 
 The example prints `Coroutine result: 42`, `Concurrent result: 42`, `Worker pool result: 42`,
-`Task group result: 42`, and `Recursive group result: 3`; it then demonstrates notifications with
-`Event signalled` and `Reusable event cycles: 2`, prints `Mutex result: 42`, and finishes with
-`Coroutine cancelled`. All messages come from `Task<void>` coroutines.
+`Blocking result: 42`, `Task group result: 42`, and `Recursive group result: 3`; it then demonstrates
+notifications with `Event signalled` and `Reusable event cycles: 2`, prints `Mutex result: 42`, and
+finishes with `Coroutine cancelled`. All messages come from `Task<void>` coroutines.
 
 ## Current API
 
@@ -96,6 +99,7 @@ using mcpplibs::cmp::OperationCancelled;
 using mcpplibs::cmp::OneShotEvent;
 using mcpplibs::cmp::TaskGroup;
 using mcpplibs::cmp::ThreadPool;
+using mcpplibs::cmp::run_blocking;
 using mcpplibs::cmp::when_all;
 
 using namespace std::chrono_literals;
@@ -142,6 +146,20 @@ Task<void> print_worker_result(
     RunLoop::Scheduler caller) {
     const auto result = co_await calculate_on_workers(workers, caller);
     std::println("Worker pool result: {}", result);
+    co_return;
+}
+
+Task<void> print_blocking_result(
+    ThreadPool::Scheduler blockingWorkers,
+    RunLoop::Scheduler caller) {
+    const auto result = co_await run_blocking(
+        blockingWorkers,
+        caller,
+        [] {
+            std::this_thread::sleep_for(1ms);
+            return 42;
+        });
+    std::println("Blocking result: {}", result);
     co_return;
 }
 
@@ -214,11 +232,15 @@ Task<void> print_cancellation(RunLoop::Scheduler scheduler, std::stop_token toke
 
 int main() {
     ThreadPool workers { 2 };
+    ThreadPool blockingWorkers { 2 };
     RunLoop loop {};
     loop.run(print_answer(loop.get_scheduler()));
     loop.run(print_concurrent_results(loop.get_scheduler()));
     loop.run(print_worker_result(
         workers.get_scheduler(),
+        loop.get_scheduler()));
+    loop.run(print_blocking_result(
+        blockingWorkers.get_scheduler(),
         loop.get_scheduler()));
     loop.run(print_task_group(loop.get_scheduler()));
     loop.run(print_event(loop.get_scheduler()));
@@ -292,6 +314,14 @@ RunLoop ready scheduling. The v1 implementation uses one work-conserving shared 
 workers. Destruction closes admission, drains every accepted entry, and joins the workers. It does
 not own higher-level Tasks, and blocking calls still block their current worker.
 
+`run_blocking(blockingWorkers, returnTo, operation, stopToken)` owns a synchronous callable in its
+lazy Task frame, schedules it once to the selected ThreadPool, and publishes its value, `void`,
+exception, or queued cancellation only after scheduling back to `returnTo`. Use a separate
+ThreadPool instance for blocking work so it cannot occupy latency-sensitive CPU workers. A stop
+request can skip work that has not been claimed; it cannot preempt a running synchronous call, and
+the return schedule is intentionally not cancellable. This is thread-based isolation, not native
+non-blocking I/O.
+
 RunLoop is not a background thread and does not make blocking code asynchronous. A Task that
 suspends without arranging a future resume can leave `run()` waiting indefinitely. CMP does not
 provide automatic thread affinity: after an external awaiter resumes on another thread, explicitly
@@ -308,6 +338,7 @@ await the desired Scheduler to return to its RunLoop.
 ├── src/cancellation.cppm     # shared cooperative-cancellation exception
 ├── src/run_loop.cppm         # RunLoop and Scheduler partition
 ├── src/thread_pool.cppm      # fixed-size CPU worker scheduler
+├── src/blocking.cppm         # structured blocking-call offload
 ├── src/when_all.cppm         # structured concurrent Task join
 ├── src/task_group.cppm       # eager mutable structured Task scope
 ├── src/one_shot_event.cppm   # allocation-free one-time notification
@@ -316,6 +347,7 @@ await the desired Scheduler to return to its RunLoop.
 ├── tests/cmp_test.cpp        # Task contract and lifetime tests
 ├── tests/run_loop_test.cpp   # scheduler, boundary, and threading tests
 ├── tests/thread_pool_test.cpp # worker, cancellation, and shutdown tests
+├── tests/blocking_test.cpp   # blocking offload, affinity, and cancellation tests
 ├── tests/when_all_test.cpp   # join ownership, result, and race tests
 ├── tests/task_group_test.cpp # mutable scope lifetime and race tests
 ├── tests/one_shot_event_test.cpp # event publication and race tests
@@ -349,7 +381,7 @@ global mcpp installation.
 
 CMP does not track `mcpp.lock`; `.gitignore` enforces that repository policy. Runtime dependencies
 belong in `[dependencies]`; gtest is declared explicitly under `[dev-dependencies.compat]`.
-The current local suite contains 105 tests across eight binaries. The POSIX-only Release pressure
+The current local suite contains 116 tests across nine binaries. The POSIX-only Release pressure
 consumer and its recorded success/failure data are documented in the
 [v1 readiness benchmark](docs/benchmarks/2026-08-29-cmp-v1-readiness.md).
 Multi-worker correctness and performance data are documented in the
@@ -366,7 +398,7 @@ Runtime work is split into independently reviewable phases:
    OneShotEvent, AsyncManualResetEvent, and AsyncMutex — implemented and pressure-tested;
 5. fixed-size multi-worker scheduling — implemented and benchmarked; work stealing remains gated
    by profiling evidence;
-6. asynchronous I/O integration and a blocking pool.
+6. structured blocking offload — implemented; native asynchronous I/O remains separately gated.
 
 The remaining order is directional, not a promise that a listed feature is already implemented.
 

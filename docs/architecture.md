@@ -14,11 +14,13 @@ returns a suspended coroutine to that loop. `schedule()`, `schedule_after()`, an
 have `std::stop_token` overloads for cooperative cancellation; timed scheduling uses relative and
 absolute `steady_clock` deadlines without a timer thread. `ThreadPool::Scheduler::schedule()`
 explicitly transfers a continuation to any fixed worker and has the same cancellation-winner rule.
+`run_blocking()` uses a caller-selected ThreadPool instance for synchronous work and publishes the
+outcome only after an explicit return Scheduler is reached.
 
 The repository contains:
 
 - one mcpp package manifest;
-- the root module `mcpplibs.cmp` with Task, cancellation, executor, join, event, and mutex partitions;
+- the root module `mcpplibs.cmp` with Task, cancellation, executor, blocking, join, event, and mutex partitions;
 - gtest contract, lifetime, exception, scheduling, and threading tests;
 - one standalone path-dependency example;
 - local v1-readiness and cross-platform ThreadPool benchmark consumers;
@@ -71,6 +73,7 @@ targets. CMP does not track an `mcpp.lock` file; it is excluded by `.gitignore`.
 │   ├── cancellation.cppm
 │   ├── run_loop.cppm
 │   ├── thread_pool.cppm
+│   ├── blocking.cppm
 │   ├── when_all.cppm
 │   ├── task_group.cppm
 │   ├── one_shot_event.cppm
@@ -80,6 +83,7 @@ targets. CMP does not track an `mcpp.lock` file; it is excluded by `.gitignore`.
 │   ├── cmp_test.cpp
 │   ├── run_loop_test.cpp
 │   ├── thread_pool_test.cpp
+│   ├── blocking_test.cpp
 │   ├── when_all_test.cpp
 │   ├── task_group_test.cpp
 │   ├── one_shot_event_test.cpp
@@ -97,7 +101,7 @@ targets. CMP does not track an `mcpp.lock` file; it is excluded by `.gitignore`.
 ## Build and tests
 
 `.xlings.json` pins the mcpp version used by the project. `mcpp build` builds the inferred library
-target. `mcpp test` discovers eight test files and links a gtest entry point for each. The 105 tests
+target. `mcpp test` discovers nine test files and links a gtest entry point for each. The 116 tests
 verify Task ownership and symmetric transfer together with structured joins, root execution,
 scheduling, exception propagation, timed and cross-thread wake-up, cancellation races, invalid
 scheduler use, loop reuse, and stack-safe repeated completion.
@@ -141,6 +145,7 @@ using mcpplibs::cmp::OperationCancelled;
 using mcpplibs::cmp::OneShotEvent;
 using mcpplibs::cmp::TaskGroup;
 using mcpplibs::cmp::ThreadPool;
+using mcpplibs::cmp::run_blocking;
 using mcpplibs::cmp::when_all;
 
 using namespace std::chrono_literals;
@@ -180,6 +185,20 @@ Task<void> print_worker_result(
     const int result = 21 * 2;
     co_await caller.schedule();
     std::println("Worker pool result: {}", result);
+    co_return;
+}
+
+Task<void> print_blocking_result(
+    ThreadPool::Scheduler blockingWorkers,
+    RunLoop::Scheduler caller) {
+    const auto result = co_await run_blocking(
+        blockingWorkers,
+        caller,
+        [] {
+            std::this_thread::sleep_for(1ms);
+            return 42;
+        });
+    std::println("Blocking result: {}", result);
     co_return;
 }
 
@@ -252,11 +271,15 @@ Task<void> print_cancellation(RunLoop::Scheduler scheduler, std::stop_token toke
 
 int main() {
     ThreadPool workers { 2 };
+    ThreadPool blockingWorkers { 2 };
     RunLoop loop {};
     loop.run(print_answer(loop.get_scheduler()));
     loop.run(print_concurrent_results(loop.get_scheduler()));
     loop.run(print_worker_result(
         workers.get_scheduler(),
+        loop.get_scheduler()));
+    loop.run(print_blocking_result(
+        blockingWorkers.get_scheduler(),
         loop.get_scheduler()));
     loop.run(print_task_group(loop.get_scheduler()));
     loop.run(print_event(loop.get_scheduler()));
@@ -273,8 +296,9 @@ compilation, and the public root runner independently of the root test targets. 
 `print_answer()` on the main thread; a short monotonic timer expires before the coroutine prints
 `Coroutine result: 42`. The next root Task concurrently joins two timed values and prints
 `Concurrent result: 42`. A worker-pool coroutine computes away from the caller, explicitly returns
-to the RunLoop, and prints `Worker pool result: 42`. The next coroutine eagerly spawns and joins two
-void Tasks before printing
+to the RunLoop, and prints `Worker pool result: 42`. A blocking callable runs on a separate pool,
+returns to the RunLoop, and prints `Blocking result: 42`. The next coroutine eagerly spawns and joins
+two void Tasks before printing
 `Task group result: 42`; a recursively growing group then prints `Recursive group result: 3`.
 Other coroutines print `Event signalled`, exercise two reusable-event cycles, and print
 `Reusable event cycles: 2`. Two guarded Tasks produce `Mutex result: 42`. A final structured group
@@ -402,8 +426,17 @@ thread on which the coroutine currently executes.
 - the pool owns threads, not Tasks, and provides no timer, blocking-I/O adaptation, detached work,
   resize, priority, or affinity API.
 
+`run_blocking(blockingWorkers, returnTo, operation, stopToken)` has the following contract:
+
+- the lazy Task owns a move-constructible callable and invokes it exactly once after a worker claim;
+- a separate ThreadPool instance isolates blocking work from latency-sensitive CPU workers;
+- value, `void`, exception, or queued cancellation is observed only after `returnTo.schedule()`;
+- cancellation can skip queued work, but cannot preempt a synchronous call after it starts;
+- the return schedule is intentionally uncancellable so every outcome reaches one executor;
+- this is thread-based isolation and does not claim native non-blocking I/O.
+
 There is no public free-standing `sync_wait`, detached execution, standalone Timer handle,
-asynchronous I/O backend, custom frame allocator, or blocking-work pool. Cancellation remains
+asynchronous I/O backend, custom frame allocator, or distinct blocking-pool type. Cancellation remains
 explicit: Scheduler waits and `AsyncManualResetEvent` accept tokens, and TaskGroup owns an optional
 shared stop channel, but the module provides no implicit propagation and no compatibility alias for
 the old scaffold module.
@@ -425,10 +458,9 @@ package contract:
 2. channels and additional structured wake-up paths;
 3. profile-guided work stealing if representative workloads justify it;
 4. asynchronous I/O integrations;
-5. a dedicated pool for unavoidable blocking work;
-6. result adapters and optional coroutine-frame allocation strategies.
+5. result adapters and optional coroutine-frame allocation strategies.
 
-Task, cancellation, RunLoop, ThreadPool, `when_all`, TaskGroup, OneShotEvent,
+Task, cancellation, RunLoop, ThreadPool, blocking offload, `when_all`, TaskGroup, OneShotEvent,
 AsyncManualResetEvent, and AsyncMutex occupy separate module partitions because they are
 implemented public boundaries.
 Further partitions or implementation units are added only when another implemented API needs them.
@@ -446,13 +478,15 @@ cd examples/basic
 mcpp run
 ```
 
-The expected result is a successful library build, 105 passing tests across eight binaries, and an
-example that prints `Coroutine result: 42`, `Concurrent result: 42`, `Worker pool result: 42`, `Task group result: 42`,
-`Recursive group result: 3`, `Event signalled`, `Reusable event cycles: 2`, `Mutex result: 42`, then
+The expected result is a successful library build, 116 passing tests across nine binaries, and an
+example that prints `Coroutine result: 42`, `Concurrent result: 42`, `Worker pool result: 42`,
+`Blocking result: 42`, `Task group result: 42`, `Recursive group result: 3`, `Event signalled`,
+`Reusable event cycles: 2`, `Mutex result: 42`, then
 `Coroutine cancelled` and exits with status 0. Tests retain the existing high-volume stack checks
 and add 20,000 recursive TaskGroup admissions, 100,000 pre-cancelled ready schedules, 50,000 manual
-event waiters, 20,000 nested reusable-event signals, and set/cancel races. Focused phase-4 race
-suites pass repeated Release runs. Compute, temporary-file, and loopback-network counts and
+event waiters, 20,000 nested reusable-event signals, set/cancel races, queued blocking cancellation,
+and 5,000 concurrent blocking offloads. Focused race suites pass repeated Release runs. Compute,
+temporary-file, and loopback-network counts and
 throughput are recorded in the
 [v1 readiness benchmark](benchmarks/2026-08-29-cmp-v1-readiness.md). ThreadPool counts, concurrency,
 and five-round Release measurements are recorded in the

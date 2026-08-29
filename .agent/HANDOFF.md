@@ -3,101 +3,93 @@
 ## 项目概览
 
 CMP 是使用 mcpp 构建的 C++23 Modules 协程运行时库，公开模块为 `mcpplibs.cmp`。当前已实现
-懒启动唯一所有权 `Task<T>`、变参/vector `when_all()`、静止点 `TaskGroup`、一次性与可复用
-事件、RAII `AsyncMutex`、带定时和取消的调用线程 `RunLoop`，以及固定大小的 CPU
-`ThreadPool`。
+懒启动单消费者 `Task<T>`、变参/vector `when_all()`、静止点 `TaskGroup`、一次性与可复用
+事件、RAII `AsyncMutex`、带定时和取消的调用线程 `RunLoop`、固定大小的 `ThreadPool`，以及
+用于隔离同步调用的 `run_blocking()`。
 
 `.xlings.json` 固定 mcpp 2026.8.11.2；当前工具链为 LLVM 22.1.8，测试依赖为
 `compat.gtest` 1.15.2。`examples/basic` 是独立 path-dependency consumer。
 
 ## 当前目标与状态
 
-第五阶段 ThreadPool v1 已完成本地实现、测试、示例、压测、三语文档同步及复审修复，当前可
-进入用户审查及远程 CI 交付。本轮未执行任何 Git 或 GitHub 操作；提交、推送、PR 和 CI 均不
-应被视为已经完成。
+Phase 6A blocking offload v1 已完成本地实现、文档同步和验证；远程尚未更新。原生异步 I/O
+不属于 6A，下一项设计工作是 Phase 6B Spec。
 
 ## 已完成工作
 
-- 新增不可移动的固定大小 `ThreadPool` 和弱引用、可复制的 `ThreadPool::Scheduler`；根模块已
-  导出该分区。
-- `schedule()` 始终挂起并转移到任意 worker；`schedule(stop_token)` 支持 completion/cancel
-  原子竞态获胜语义。
-- 实现共享 FIFO、休眠 worker、逐项唤醒、锁外恢复、构造失败清理、关闭/入队线性化、排空并
-  join，以及 worker 内自析构终止保护。
-- 新增 15 项确定性 ThreadPool 测试，覆盖 API、FIFO、多 worker 唤醒、结构化组合、取消竞态、
-  高容量/栈安全、关闭与过期 Scheduler。
-- 复审后把默认 worker 数断言收紧为精确契约，并补齐同源与异源过期 Scheduler 的身份比较
-  测试。
-- `examples/basic` 增加协程内 worker 计算、显式回到 RunLoop 并打印
-  `Worker pool result: 42` 的示例。
-- 新增标准库限定的 `benchmarks/thread-pool` consumer 和五轮数据报告；每轮覆盖粗粒度 CPU、
-  连续调度、worker 内 fan-out 和并发重调度。
-- README、架构文档、第五阶段设计/计划及压测报告已同步到实现事实。
-- `mcpp-style-ref` 不再重复维护易过期的分区清单，改以架构文档为当前事实来源；本轮涉及的
-  混合换行文件也已统一。
+- 新增 `mcpplibs.cmp:blocking` 分区并由根模块导出一个公共函数模板：
+  `run_blocking(blockingWorkers, returnTo, operation, stopToken)`。
+- helper 按值持有 callable，支持 `void`、可移动值、move-only callable/result 和异常传播；
+  callable 在指定 ThreadPool 上执行一次，结果只在显式返回 Scheduler 上发布。
+- 复用现有 `ThreadPool` 的调度、取消、队列和关闭契约；没有新增 `BlockingPool`、隐藏全局
+  executor、future、类型擦除、依赖或 manifest 配置。
+- 新增 11 项确定性测试，覆盖懒启动、worker/返回线程亲和、返回另一 ThreadPool、值/void、
+  move-only、异常、预取消/排队取消/晚取消、取消竞态、过期与 inactive Scheduler、RunLoop
+  响应性，以及 5,000 个并发 offload 的 exactly-once 行为。
+- `examples/basic` 新增独立 blocking ThreadPool，并在协程中打印 `Blocking result: 42`。
+- `benchmarks/v1-readiness` 的文件与回环网络场景已从手写 `jthread` adapter 迁移到一个专用
+  CMP ThreadPool 和 `run_blocking()`；负载及成功/失败硬检查保持不变。
+- 三份 README、三份架构文档、Phase 6A Design/Plan 和 v1 readiness 数据报告已同步到实现
+  事实。
 
 ## 重要决策
 
-- v1 只公开 `ThreadPool`、`get_scheduler()`、`thread_count()` 和两个 `schedule()` 重载；不增加
-  executor 基类、submit/detach、resize、优先级、亲和或公共 shutdown API。
-- 默认 worker 数使用 `hardware_concurrency()` 并把未知的零归一为一；显式传零抛出
-  `std::invalid_argument`。
-- 队列是无界共享 `std::deque`。有界同步接纳可能让递归提交的全部 worker 互相等待，因此
-  backpressure 必须另行设计。
-- 取消项留在 FIFO，由 worker 消费并恢复；取消回调不扫描队列，也不在请求取消的线程恢复用户
-  协程。
-- 析构关闭接纳并排空已经接纳的 continuation；ThreadPool 只拥有执行线程，Task 生命周期仍由
-  `Task`、`when_all()` 和 `TaskGroup` 管理。
-- 本机数据证明粗粒度 CPU 并行有效，也证明微任务会争用共享队列；work stealing 只有在代表性
-  workload 的 profiler 证明共享队列是主要瓶颈后，才进入单独设计。
+- 独立的普通 `ThreadPool` 实例就是 blocking pool；不维护行为相同的第二种线程池类型。
+- `run_blocking()` 是懒 `Task`，callable 和两个 Scheduler 都按值进入协程帧，避免临时对象
+  悬空。
+- 第一次调度接受可选 `std::stop_token`；取消只能跳过尚未被 worker claim 的 callable。
+  已经开始的同步调用不能被抢占。
+- 返回调度不接受取消 token，确保值、异常或取消结果不会滞留在 blocking worker。
+- 返回 Scheduler 失败时直接传播其异常；失效的完成上下文本身无法被 helper 修复。
+- Phase 6A 仍是每个运行中同步调用占用一个系统线程的隔离方案，不宣称原生非阻塞 I/O。
+- 队列沿用 ThreadPool 的无界共享 FIFO；背压、超时、强制中断和 worker replacement 均未在
+  没有实测需求前增加。
 
 ## 修改 / 重要文件
 
-- 核心：`src/thread_pool.cppm`、`src/cmp.cppm`
-- 测试：`tests/thread_pool_test.cpp`
+- 核心：`src/blocking.cppm`、`src/cmp.cppm`
+- 测试：`tests/blocking_test.cpp`
 - 示例：`examples/basic/src/main.cpp`
-- 压测：`benchmarks/thread-pool/`、`docs/benchmarks/2026-08-29-cmp-thread-pool.md`
-- 方案：`docs/superpowers/specs/2026-08-29-cmp-phase5-thread-pool-v1-design.md`、
-  `docs/superpowers/plans/2026-08-29-cmp-phase5-thread-pool-v1.md`
-- 公共文档：三份 README 与三份 `docs/architecture*` 文档
-- Agent 技能：`.agents/skills/mcpp-style-ref/SKILL.md`
+- 压测：`benchmarks/v1-readiness/src/main.cpp`、
+  `docs/benchmarks/2026-08-29-cmp-v1-readiness.md`
+- 方案：`docs/superpowers/specs/2026-08-29-cmp-phase6a-blocking-offload-v1-design.md`、
+  `docs/superpowers/plans/2026-08-29-cmp-phase6a-blocking-offload-v1.md`
+- 公共文档：`README.md`、`README.zh.md`、`README.zh.hant.md`、`docs/architecture.md`、
+  `docs/architecture.zh.md`、`docs/architecture.zh.hant.md`
 
 ## 验证情况
 
 - `mcpp build --profile dev --strict --cache=off`：通过。
-- `mcpp test --profile dev --strict --cache=off`：8 个二进制、105/105 通过。
+- `mcpp test --profile dev --strict --cache=off`：9 个二进制、116/116 通过。
 - `mcpp build --profile release --strict --cache=off`：通过。
-- `mcpp test --profile release --strict --cache=off`：8 个二进制、105/105 通过。
-- Dev `thread_pool_test` 定向复验：15/15 通过。
-- Release 关键竞态测试子集连续执行 100 轮：100/100 通过。
-- `examples/basic` 的 `mcpp run`：通过，包含 `Worker pool result: 42`，退出码 0。
-- `mcpp-style-ref` 通过 `quick_validate.py` 校验；架构文档链接有效。
-- 项目文本文件换行复查未发现混合 CRLF/LF 文件。
-- ThreadPool Release benchmark：构建通过；五轮记录共 8,410,240 次操作全部成功、非预期失败
-  为 0；最终可执行性复验也全部 PASS。
-- 五轮中位数显示粗粒度 CPU 任务从 1 到 8 worker 约 7.56 倍加速；完整原始数据见压测报告。
-- 以上均为本机 Linux/WSL2 结果；本轮没有运行 GitHub 三平台 CI。
+- `mcpp test --profile release --strict --cache=off`：9 个二进制、116/116 通过。
+- Dev 定向 `blocking_test`：11/11 通过。
+- Release `CancellationRaceInvokesAtMostOnce` 连续执行 100 轮：100/100 通过。
+- `examples/basic` 的 `mcpp run`：通过，包含 `Blocking result: 42`，退出码 0。
+- `benchmarks/v1-readiness` Release strict 构建通过；迁移后执行 5 轮，compute、file_io 和
+  network_loopback 每轮均 PASS，五轮非预期失败总数为 0。
+- 文件/网络每轮计数分别为 1,000/20,000 成功、100/100 预期失败、0 非预期失败；原始耗时和
+  吞吐已写入 benchmark 报告。
+- 当前 mcpp 仍输出 SubOS 缺少 `subos_info` 的既有环境提示，但所有构建和运行成功。
+- 以上均为本机 Linux/WSL2 结果；尚未执行 GitHub 三平台 CI 或其他远程操作。
 
 ## 已知问题 / 风险
 
-- 共享 FIFO 在大量微小 continuation 与较多 worker 时存在显著 mutex/通知争用；这是已记录的
-  v1 性能上限，不是丢任务或执行失败。
-- ThreadPool 不抢占；长计算或阻塞调用会占住一个 worker。异步 I/O 与专用 blocking pool 尚未
-  实现。
-- 析构会等待已接纳 continuation 返回；用户代码永久阻塞时析构也会永久等待。在自身 worker
-  内析构属于硬生命周期错误并立即终止。
-- 三平台兼容性尚需远程 CI 确认。
-- 本机 mcpp 仍输出 SubOS 缺少 `subos_info` 的环境警告，但本轮所有构建和运行均成功。
+- 运行中的同步调用不可抢占；永久阻塞会永久占用 worker，并使等待它的 Task 和 pool 析构
+  无法完成。callable 如需协作取消，必须自行捕获并检查 token。
+- ThreadPool 使用无界共享 FIFO；持续生产快于消费时，应用需要限制自己的结构化 in-flight
+  数量。
+- 返回 Scheduler 的 owner 必须持续存活；RunLoop Scheduler 还必须处于 active `run()` 中。
+- `run_blocking()` 是线程隔离，不是 epoll、io_uring、kqueue 或 IOCP 等原生异步 I/O。
+- 三平台兼容性仍需远程 CI 确认。
 
 ## 剩余工作
 
-1. 用户审查第五阶段实现与压测结论。
-2. 获得明确授权后，才可执行对应范围的 commit、push、PR 或远程 CI 操作。
-3. 第五阶段合并并通过三平台 CI 后，再开始第六阶段异步 I/O / blocking pool 设计；不要把该
-   能力补进当前 ThreadPool。
+1. 用户审查 Phase 6A 本地改动；Commit、Push、PR 与 CI 均需分别获得明确授权。
+2. 用户确认进入下一设计阶段后，为一个窄资源族编写 Phase 6B 原生异步 I/O Spec；实现前仍需
+   单独批准。
 
 ## 推荐下一步
 
-先审查 `src/thread_pool.cppm`、`tests/thread_pool_test.cpp` 和线程池压测报告。若认可当前共享
-FIFO v1 边界，再明确授权所需的 Git/GitHub 步骤完成交付；合并后从第六阶段的 I/O 契约与平台
-边界开始设计。
+先审查并提交 Phase 6A；随后只设计 Phase 6B 的最小原生异步 I/O 边界，优先选择单一资源族，
+不把文件、网络和所有平台后端一次性绑定在同一阶段。

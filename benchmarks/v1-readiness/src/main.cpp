@@ -13,12 +13,14 @@ import mcpplibs.cmp;
 
 namespace {
 
-using mcpplibs::cmp::AsyncManualResetEvent;
 using mcpplibs::cmp::RunLoop;
 using mcpplibs::cmp::Task;
 using mcpplibs::cmp::TaskGroup;
+using mcpplibs::cmp::ThreadPool;
+using mcpplibs::cmp::run_blocking;
 
 using Scheduler = RunLoop::Scheduler;
+using BlockingScheduler = ThreadPool::Scheduler;
 using Clock = std::chrono::steady_clock;
 
 constexpr int COMPUTE_TASKS { 50'000 };
@@ -242,29 +244,6 @@ void send_all(int socket, std::string_view data) {
     return result != 0 && errno == ECONNREFUSED;
 }
 
-template<typename Work>
-Task<void> run_external(Scheduler scheduler, Work work) {
-    AsyncManualResetEvent completed {};
-    std::exception_ptr exception {};
-
-    std::jthread worker { [&] {
-        try {
-            work();
-        } catch (...) {
-            exception = std::current_exception();
-        }
-        completed.set();
-    } };
-
-    co_await completed;
-    co_await scheduler.schedule();
-    worker.join();
-
-    if (exception) {
-        std::rethrow_exception(exception);
-    }
-}
-
 Task<void> failing_compute(Scheduler scheduler) {
     co_await scheduler.schedule();
     throw std::invalid_argument { "expected compute failure" };
@@ -317,6 +296,7 @@ Task<void> run_compute(Scheduler scheduler, Counters& counters) {
 }
 
 Task<void> run_file_io(
+    BlockingScheduler blockingWorkers,
     Scheduler scheduler,
     const std::filesystem::path& directory,
     Counters& counters) {
@@ -324,7 +304,7 @@ Task<void> run_file_io(
     TaskGroup group {};
 
     for (int workerIndex { 0 }; workerIndex < FILE_WORKERS; ++workerIndex) {
-        group.spawn(run_external(scheduler, [&, workerIndex] {
+        group.spawn(run_blocking(blockingWorkers, scheduler, [&, workerIndex] {
             const auto file = directory /
                 std::format("worker-{}.bin", workerIndex);
 
@@ -369,13 +349,16 @@ Task<void> run_file_io(
     co_await group.join();
 }
 
-Task<void> run_network_io(Scheduler scheduler, Counters& counters) {
+Task<void> run_network_io(
+    BlockingScheduler blockingWorkers,
+    Scheduler scheduler,
+    Counters& counters) {
     const std::string payload(NETWORK_PAYLOAD_SIZE, 'n');
     TaskGroup group {};
 
     for (int workerIndex { 0 }; workerIndex < NETWORK_WORKERS; ++workerIndex) {
         static_cast<void>(workerIndex);
-        group.spawn(run_external(scheduler, [&] {
+        group.spawn(run_blocking(blockingWorkers, scheduler, [&] {
             int completed { 0 };
             try {
                 auto [client, server] = make_loopback_pair();
@@ -461,6 +444,9 @@ void print_metrics(const Metrics& metrics) {
 
 int main() {
     TemporaryDirectory directory {};
+    ThreadPool blockingWorkers {
+        std::max(FILE_WORKERS, NETWORK_WORKERS)
+    };
     std::vector<Metrics> results {};
     results.reserve(3);
 
@@ -475,19 +461,27 @@ int main() {
         "file_io",
         FILE_WORKERS * (FILE_ROUNDS + FILE_FAILURES),
         [&](Scheduler scheduler, Counters& counters) {
-            return run_file_io(scheduler, directory.path(), counters);
+            return run_file_io(
+                blockingWorkers.get_scheduler(),
+                scheduler,
+                directory.path(),
+                counters);
         }));
 
     results.emplace_back(measure(
         "network_loopback",
         NETWORK_WORKERS * (NETWORK_ROUNDS + NETWORK_FAILURES),
-        [](Scheduler scheduler, Counters& counters) {
-            return run_network_io(scheduler, counters);
+        [&](Scheduler scheduler, Counters& counters) {
+            return run_network_io(
+                blockingWorkers.get_scheduler(),
+                scheduler,
+                counters);
         }));
 
     std::println(
-        "environment,hardware_threads={} free_space_bytes={}",
+        "environment,hardware_threads={} blocking_workers={} free_space_bytes={}",
         std::thread::hardware_concurrency(),
+        blockingWorkers.thread_count(),
         std::filesystem::space(directory.path()).available);
     std::println(
         "scenario,operations,successes,expected_failures,unexpected_failures,elapsed_ms,ops_per_second,status");

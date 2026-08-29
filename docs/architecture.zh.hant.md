@@ -13,12 +13,13 @@ CMP 是一個具備小型協程執行核心的 C++23 模組專案。根模組匯
 把暫停協程送回對應執行迴圈。`schedule()`、`schedule_after()` 和 `schedule_at()` 都有接受
 `std::stop_token` 的協作式取消多載；定時排程使用相對和絕對的 `steady_clock` 期限，且不建立
 計時執行緒。`ThreadPool::Scheduler::schedule()` 會把 continuation 明確轉移到任意固定
-worker，並採用相同的取消獲勝規則。
+worker，並採用相同的取消獲勝規則。`run_blocking()` 使用呼叫端選擇的 ThreadPool 實例執行
+同步工作，並只在到達明確返回 Scheduler 後發布結果。
 
 儲存庫現有內容包括：
 
 - 一份 mcpp 套件清單；
-- 根模組 `mcpplibs.cmp` 及 Task、cancellation、執行器、join、event、mutex 模組分割區；
+- 根模組 `mcpplibs.cmp` 及 Task、cancellation、執行器、blocking、join、event、mutex 模組分割區；
 - 涵蓋契約、生命週期、例外、排程和執行緒行為的 gtest 測試；
 - 一個透過路徑相依使用根套件的獨立範例；
 - v1 可開發性壓測和跨平台 ThreadPool 壓測 consumer；
@@ -69,6 +70,7 @@ mcpp 套件由 `mcpplibs` 和 `cmp` 共同識別。使用端在 `[dependencies.m
 │   ├── cancellation.cppm
 │   ├── run_loop.cppm
 │   ├── thread_pool.cppm
+│   ├── blocking.cppm
 │   ├── when_all.cppm
 │   ├── task_group.cppm
 │   ├── one_shot_event.cppm
@@ -78,6 +80,7 @@ mcpp 套件由 `mcpplibs` 和 `cmp` 共同識別。使用端在 `[dependencies.m
 │   ├── cmp_test.cpp
 │   ├── run_loop_test.cpp
 │   ├── thread_pool_test.cpp
+│   ├── blocking_test.cpp
 │   ├── when_all_test.cpp
 │   ├── task_group_test.cpp
 │   ├── one_shot_event_test.cpp
@@ -95,7 +98,7 @@ mcpp 套件由 `mcpplibs` 和 `cmp` 共同識別。使用端在 `[dependencies.m
 ## 建置與測試
 
 `.xlings.json` 固定專案使用的 mcpp 版本。`mcpp build` 建置自動推斷的函式庫目標。
-`mcpp test` 會找到八個測試檔案，並為每個檔案連結 gtest 進入點。105 項測試同時驗證 Task 所有權
+`mcpp test` 會找到九個測試檔案，並為每個檔案連結 gtest 進入點。116 項測試同時驗證 Task 所有權
 和對稱轉移、結構化匯合，以及根任務執行、普通與定時排程、例外傳播、跨執行緒期限喚醒、
 無效 Scheduler、取消競態、RunLoop 重複使用和不會增長呼叫堆疊的重複完成。
 
@@ -136,6 +139,7 @@ using mcpplibs::cmp::OperationCancelled;
 using mcpplibs::cmp::OneShotEvent;
 using mcpplibs::cmp::TaskGroup;
 using mcpplibs::cmp::ThreadPool;
+using mcpplibs::cmp::run_blocking;
 using mcpplibs::cmp::when_all;
 
 using namespace std::chrono_literals;
@@ -175,6 +179,20 @@ Task<void> print_worker_result(
     const int result = 21 * 2;
     co_await caller.schedule();
     std::println("Worker pool result: {}", result);
+    co_return;
+}
+
+Task<void> print_blocking_result(
+    ThreadPool::Scheduler blockingWorkers,
+    RunLoop::Scheduler caller) {
+    const auto result = co_await run_blocking(
+        blockingWorkers,
+        caller,
+        [] {
+            std::this_thread::sleep_for(1ms);
+            return 42;
+        });
+    std::println("Blocking result: {}", result);
     co_return;
 }
 
@@ -247,11 +265,15 @@ Task<void> print_cancellation(RunLoop::Scheduler scheduler, std::stop_token toke
 
 int main() {
     ThreadPool workers { 2 };
+    ThreadPool blockingWorkers { 2 };
     RunLoop loop {};
     loop.run(print_answer(loop.get_scheduler()));
     loop.run(print_concurrent_results(loop.get_scheduler()));
     loop.run(print_worker_result(
         workers.get_scheduler(),
+        loop.get_scheduler()));
+    loop.run(print_blocking_result(
+        blockingWorkers.get_scheduler(),
         loop.get_scheduler()));
     loop.run(print_task_group(loop.get_scheduler()));
     loop.run(print_event(loop.get_scheduler()));
@@ -265,7 +287,8 @@ int main() {
 
 這個範例在根測試目標之外，單獨檢查路徑相依解析、模組使用、外部協程編譯和公開根任務
 驅動器。RunLoop 依序輸出 `Coroutine result: 42` 和 `Concurrent result: 42`；worker pool
-協程離開呼叫執行緒完成計算，明確回到 RunLoop 後輸出 `Worker pool result: 42`，隨後輸出
+協程離開呼叫執行緒完成計算，明確回到 RunLoop 後輸出 `Worker pool result: 42`。阻塞 callable
+在獨立 pool 上執行，返回 RunLoop 後輸出 `Blocking result: 42`，隨後輸出
 `Task group result: 42`；遞迴增長的 group 輸出 `Recursive group result: 3`。其他協程展示
 一次性及兩輪可複用事件並輸出 `Event signalled`、`Reusable event cycles: 2`，兩個受保護
 Task 輸出 `Mutex result: 42`。最後一個結構化 group 使用 `cancel_and_join()`，從可取消就緒
@@ -382,8 +405,17 @@ Task；明確等待原 Scheduler 才會把 continuation 送回對應 RunLoop。�
 - pool 只擁有執行緒、不擁有 Task，也不提供 timer、阻塞 I/O 適配、detached、resize、優先級
   或 affinity API。
 
+`run_blocking(blockingWorkers, returnTo, operation, stopToken)` 遵循以下契約：
+
+- 延遲 Task 持有可移動建構的 callable，並在 worker 領取後恰好呼叫一次；
+- 使用獨立的 ThreadPool 實例，將阻塞工作與延遲敏感的 CPU worker 隔離；
+- 值、`void`、例外或排隊取消只在 `returnTo.schedule()` 後可見；
+- 取消可以跳過排隊工作，但不能搶佔已經開始的同步呼叫；
+- 返回排程刻意不可取消，使每個結果都到達一個執行器；
+- 這是基於執行緒的隔離，不表示原生非阻塞 I/O。
+
 目前沒有公開自由函式 `sync_wait`、detached 執行、獨立 Timer 控制代碼、非同步 I/O 後端、
-自訂協程框架 allocator 或阻塞工作執行緒池。取消仍是明確的：Scheduler 等待和
+自訂協程框架 allocator 或獨立的阻塞執行緒池型別。取消仍是明確的：Scheduler 等待和
 `AsyncManualResetEvent` 接受 token，TaskGroup 可持有共享 stop 通道，但模組不提供隱式
 傳播，並且沒有保留舊骨架模組的相容別名。
 
@@ -402,10 +434,9 @@ CMP 名稱中的 `C` 與 Go 執行期中的 `G` 相呼應，但這只說明命�
 2. channel 和更多結構化喚醒路徑；
 3. 代表性負載證明有必要時再加入 profiling 驅動的工作竊取；
 4. 非同步 I/O 整合；
-5. 處理無法避免之阻塞工作的專用執行緒池；
-6. 結果適配器和可選的協程框架配置策略。
+5. 結果適配器和可選的協程框架配置策略。
 
-Task、cancellation、RunLoop、ThreadPool、`when_all`、TaskGroup、OneShotEvent、
+Task、cancellation、RunLoop、ThreadPool、blocking offload、`when_all`、TaskGroup、OneShotEvent、
 AsyncManualResetEvent 與 AsyncMutex 已形成真實的公開邊界，因此分別位於模組分割區中。
 只有其他已實作 API 確實需要新邊界時，才繼續增加模組分割區或實作單元。
 
@@ -422,13 +453,14 @@ cd examples/basic
 mcpp run
 ```
 
-預期結果是函式庫建置成功、八個二進位檔中的 105 項測試全部通過，而且範例依序輸出
-`Coroutine result: 42`、`Concurrent result: 42`、`Worker pool result: 42`、`Task group result: 42`、
-`Recursive group result: 3`、`Event signalled`、`Reusable event cycles: 2`、
+預期結果是函式庫建置成功、九個二進位檔中的 116 項測試全部通過，而且範例依序輸出
+`Coroutine result: 42`、`Concurrent result: 42`、`Worker pool result: 42`、
+`Blocking result: 42`、`Task group result: 42`、`Recursive group result: 3`、`Event signalled`、
+`Reusable event cycles: 2`、
 `Mutex result: 42` 和 `Coroutine cancelled` 後以狀態 0 結束。測試保留原有高容量堆疊安全
 檢查，並增加兩萬次 TaskGroup 遞迴接納、十萬次預取消就緒排程、五萬個 manual event 等待者、
-兩萬次巢狀可複用事件訊號及 set/cancel 競態；第四階段重點競態套件已連續執行多輪 Release
-測試。計算、臨時檔案和回環網路的成功/失敗計數及吞吐記錄在
+兩萬次巢狀可複用事件訊號、set/cancel 競態、排隊阻塞取消和 5,000 個並行阻塞 offload；重點
+競態套件已連續執行多輪 Release 測試。計算、臨時檔案和回環網路的成功/失敗計數及吞吐記錄在
 [v1 可開發性壓測](benchmarks/2026-08-29-cmp-v1-readiness.md)。ThreadPool 的計數、並行和五輪
 Release 資料記錄在[執行緒池壓測](benchmarks/2026-08-29-cmp-thread-pool.md)。目前 Windows LLVM 工具鏈
 不會產生 GNU depfile；如果模組介面包含的檔案發生變更，增量建置可能沿用舊的 BMI 或

@@ -14,9 +14,10 @@ path-dependency consumer。
 
 ## 当前目标与状态
 
-Phase 6A blocking offload v1 与 Phase 6B 第 1–10 项均已在当前分支本地完成且尚未推送。Phase
-6B 完整本地门禁已全部通过，Design/Plan 已标记为“本地实现并验证，远程 CI 待确认”。
-已审查全部现有 Spec/Plan；除 Phase 6B 远程门禁外，没有其他已批准但尚未执行的本地任务。
+Phase 4 completion、Phase 5 ThreadPool、Phase 6A blocking offload 与 Phase 6B 第 1–10 项均已
+本地完成；本阶段新增提交尚未推送。Phase 6B 完整本地门禁已全部通过，Design/Plan 已标记为
+“本地实现并验证，远程 CI 待确认”。已审查全部现有 Spec/Plan；没有尚未执行的本地任务，
+Phase 5 与 Phase 6B 的远程三平台交付验证仍未由当前证据证明。
 
 ## 已完成工作
 
@@ -37,6 +38,8 @@ Phase 6A blocking offload v1 与 Phase 6B 第 1–10 项均已在当前分支本
   10 个测试二进制/140 项测试及 readiness 结果；Phase 6A Design/Plan 和数据报告也与实现一致。
 - 根据本地 `main` 的 PR #1–#4 合并提交，纠正 bootstrap、RunLoop、Timer、Cancellation 早期
   Design/Plan 的陈旧状态；未推断未留存的 Timer 远程检查明细。
+- 完成 13 份 Spec 与 13 份 Plan 的逐项审计：全部有明确状态、没有未勾选任务，本地 Markdown
+  链接完整；11 个公开模块分区、10 个测试文件及 140 项测试与文档一致。
 - 完成 Phase 6B 依赖核查：mcpp-index 当前提供 `chriskohlhoff.asio@1.38.1`，其 C++23 模块
   `asio` 覆盖 Linux、macOS 和 Windows，能够复用 epoll、kqueue 与 IOCP 后端。
 - 新增并批准 Phase 6B TCP client v1 Design，确定首个原生异步 I/O 切片仅包含数值地址 TCP
@@ -213,18 +216,15 @@ Phase 6A blocking offload v1 与 Phase 6B 第 1–10 项均已在当前分支本
   数量。
 - 返回 Scheduler 的 owner 必须持续存活；RunLoop Scheduler 还必须处于 active `run()` 中。
 - `run_blocking()` 是线程隔离，不是 epoll、io_uring、kqueue 或 IOCP 等原生异步 I/O。
-- 三平台兼容性仍需远程 CI 确认。
+- Phase 5 ThreadPool 与 Phase 6B TCP 的三平台交付验证仍需远程 CI 确认。
 - `chriskohlhoff.asio@1.38.1` 只在本机 Linux/WSL2 + LLVM 22.1.8 完成模块编译；macOS 与
   Windows 仍需后续远程 CI 验证。
-- Phase 6B 本地已有 backend、`IoContext`、native bridge、connect/read/write、EOF/overlap、
-  pending cancellation、close/is_open、shutdown 竞态、32 客户端负载、readiness TCP client
-  迁移及六份开发文档；最终本地矩阵仍待后续步骤。
 - 单 I/O driver 是 v1 的刻意简化；只有 benchmark 证明它是瓶颈后才设计多 driver/strand。
 
 ## 剩余工作
 
 1. 本地开发与验证已完成；后续只有在用户另行授权 push/PR 后，才能取得 Linux、macOS、
-   Windows 远程 CI 结果并达到 Design 的最终跨平台完成条件。
+   Windows 结果，完成 Phase 5 与 Phase 6B 剩余的远程交付验证。
 
 ## 推荐下一步
 

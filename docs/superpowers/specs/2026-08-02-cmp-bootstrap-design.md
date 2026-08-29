@@ -1,7 +1,7 @@
 # CMP Bootstrap Design
 
 **Date:** 2026-08-02
-**Status:** Approved for implementation
+**Status:** Implemented and merged via PR #1
 **Base:** `main` at `13b95c3`
 
 ## Purpose

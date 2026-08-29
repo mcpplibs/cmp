@@ -9,6 +9,8 @@
 **English** · [简体中文](README.zh.md) · [繁體中文](README.zh.hant.md)
 
 [mcpp](https://github.com/mcpp-community/mcpp) · [Architecture](docs/architecture.md) ·
+[v1 readiness benchmark](docs/benchmarks/2026-08-29-cmp-v1-readiness.md) ·
+[thread-pool benchmark](docs/benchmarks/2026-08-29-cmp-thread-pool.md) ·
 [Issues](https://github.com/mcpplibs/cmp/issues)
 
 [![ci-linux](https://github.com/mcpplibs/cmp/actions/workflows/ci-linux.yml/badge.svg?branch=main)](https://github.com/mcpplibs/cmp/actions/workflows/ci-linux.yml)
@@ -17,15 +19,21 @@
 
 > [!IMPORTANT]
 > CMP provides a lazy, single-consumer `Task<T>` / `Task<void>`, structured variadic and vector
-> `when_all()`, an eager structured `TaskGroup`, a one-way `OneShotEvent`, an RAII `AsyncMutex`, and
-> a caller-thread `RunLoop` with explicit and monotonic timed scheduling. Timed waits and TaskGroup children can
-> use explicit cooperative cancellation with `std::stop_token`; asynchronous I/O and detached
-> execution are not implemented.
+> `when_all()`, an eager structured `TaskGroup`, one-shot and reusable events, an RAII `AsyncMutex`,
+> a caller-thread `RunLoop` with explicit and monotonic timed scheduling, and a fixed-size CPU
+> `ThreadPool`. Phase 6B adds an explicit `IoContext` and move-only `TcpStream` for native async
+> numeric-address TCP clients. `run_blocking()` executes an owned synchronous callable on a
+> dedicated pool instance
+> and delivers its outcome through an explicit return Scheduler. Ready scheduling on either
+> executor, timed waits, reusable-event waits, TaskGroup children, and queued blocking offloads can
+> use explicit cooperative cancellation with `std::stop_token`; TCP operations use the same token
+> model. Detached execution and other native I/O families are not implemented.
 
 CMP is being built as a modern coroutine runtime and library on standard stackless C++
 coroutines. Its explicit `co_await` model now covers fixed and incremental structured concurrency,
-one-time event notification, scheduling, monotonic timers, and cancellable timed waits and can
-grow, in small verified steps, toward asynchronous I/O and safe handling of blocking work.
+one-time event notification, caller-thread and multi-worker scheduling, monotonic timers, and
+cancellable waits, structured isolation of blocking work, and one portable native async TCP client
+slice.
 
 ## Why CMP?
 
@@ -50,10 +58,12 @@ promise that:
 - a task is automatically equivalent to a Go goroutine;
 - an arbitrary blocking call becomes non-blocking;
 - coroutine switching is safe directly inside a signal handler;
-- M:N scheduling, work stealing, general cancellation propagation, or async I/O already exist.
+- task migration is implicit, work stealing is already enabled, or every I/O family is async.
 
-Those capabilities must be designed and verified individually. The expected direction is
-explicit async I/O awaiters, a dedicated blocking pool, and cooperative safe points.
+Those capabilities must be designed and verified individually. CMP now uses an explicitly
+dedicated `ThreadPool` instance with `run_blocking()` for synchronous work. Phase 6B provides native
+async TCP clients; DNS, listening sockets, TLS, file I/O, and cooperative safe points remain
+separate work.
 
 ## Quick Start
 
@@ -74,11 +84,10 @@ cd examples/basic
 mcpp run
 ```
 
-The example prints `Coroutine result: 42`, joins two timed Tasks and prints
-`Concurrent result: 42`, eagerly spawns two scoped Tasks and prints `Task group result: 42`, awaits
-a one-time notification and prints `Event signalled`, runs two guarded Tasks and prints
-`Mutex result: 42`, then prints `Coroutine cancelled` from a pre-cancelled timed wait. All messages
-come from `Task<void>` coroutines.
+The example prints `Coroutine result: 42`, `Concurrent result: 42`, `Worker pool result: 42`,
+`Blocking result: 42`, `Task group result: 42`, and `Recursive group result: 3`; it then demonstrates
+notifications with `Event signalled` and `Reusable event cycles: 2`, prints `Mutex result: 42`, and
+finishes with `Coroutine cancelled`. All messages come from `Task<void>` coroutines.
 
 ## Current API
 
@@ -92,6 +101,10 @@ using mcpplibs::cmp::AsyncMutex;
 using mcpplibs::cmp::OperationCancelled;
 using mcpplibs::cmp::OneShotEvent;
 using mcpplibs::cmp::TaskGroup;
+using mcpplibs::cmp::ThreadPool;
+using mcpplibs::cmp::IoContext;
+using mcpplibs::cmp::TcpStream;
+using mcpplibs::cmp::run_blocking;
 using mcpplibs::cmp::when_all;
 
 using namespace std::chrono_literals;
@@ -121,6 +134,37 @@ Task<void> print_concurrent_results(RunLoop::Scheduler scheduler) {
     tasks.emplace_back(delayed_value(scheduler, 1ms, 22));
     auto values = co_await when_all(std::move(tasks));
     std::println("Concurrent result: {}", values[0] + values[1]);
+    co_return;
+}
+
+Task<int> calculate_on_workers(
+    ThreadPool::Scheduler workers,
+    RunLoop::Scheduler caller) {
+    co_await workers.schedule();
+    const int result = 21 * 2;
+    co_await caller.schedule();
+    co_return result;
+}
+
+Task<void> print_worker_result(
+    ThreadPool::Scheduler workers,
+    RunLoop::Scheduler caller) {
+    const auto result = co_await calculate_on_workers(workers, caller);
+    std::println("Worker pool result: {}", result);
+    co_return;
+}
+
+Task<void> print_blocking_result(
+    ThreadPool::Scheduler blockingWorkers,
+    RunLoop::Scheduler caller) {
+    const auto result = co_await run_blocking(
+        blockingWorkers,
+        caller,
+        [] {
+            std::this_thread::sleep_for(1ms);
+            return 42;
+        });
+    std::println("Blocking result: {}", result);
     co_return;
 }
 
@@ -192,9 +236,17 @@ Task<void> print_cancellation(RunLoop::Scheduler scheduler, std::stop_token toke
 }
 
 int main() {
+    ThreadPool workers { 2 };
+    ThreadPool blockingWorkers { 2 };
     RunLoop loop {};
     loop.run(print_answer(loop.get_scheduler()));
     loop.run(print_concurrent_results(loop.get_scheduler()));
+    loop.run(print_worker_result(
+        workers.get_scheduler(),
+        loop.get_scheduler()));
+    loop.run(print_blocking_result(
+        blockingWorkers.get_scheduler(),
+        loop.get_scheduler()));
     loop.run(print_task_group(loop.get_scheduler()));
     loop.run(print_event(loop.get_scheduler()));
     loop.run(print_mutex(loop.get_scheduler()));
@@ -219,17 +271,22 @@ parameter order is rethrown. Named Tasks must be moved into `when_all()`. A runt
 homogeneous collection can be passed as `std::vector<Task<T>>`; it returns a result vector in the
 same index order, and a named input vector must also be moved.
 
-`TaskGroup::spawn()` takes ownership of a `Task<void>` and starts it immediately. Awaiting the
-single-use `join()` closes admission and waits for every accepted child before rethrowing the first
-exception in admission order. The group must be joined before destruction. `get_stop_token()` and
-`request_stop()` provide one explicit standard cancellation channel; the token is not injected
-automatically, so developers pass it to children that support cancellation. Use `when_all()` when
-child results must be returned.
+`TaskGroup::spawn()` takes ownership of a `Task<void>` and starts it immediately. The single-use
+`join()` waits until the group reaches quiescence; an active child may recursively add work while
+join is waiting. Admission closes permanently when the active count reaches zero. The group must
+be joined before destruction. `get_stop_token()` and `request_stop()` provide one explicit
+standard cancellation channel, while `cancel_and_join()` requests that channel before joining.
+The token is not injected automatically. Use `when_all()` when child results must be returned.
 
 `co_await event` suspends on an unset `OneShotEvent` without allocating. The first thread-safe
 `set()` permanently sets it and resumes every registered waiter exactly once on the setter thread;
 later waits continue inline and later sets do nothing. The event is immovable and must outlive its
 waiters. It deliberately has no reset or implicit Scheduler transfer.
+
+`AsyncManualResetEvent` adds reusable `set()` / `reset()` cycles. `wait(stop_token)` supports
+cooperative cancellation, pending waiters are resumed in FIFO order, and set-versus-cancel has one
+stable winner. Resumption occurs on the thread calling `set()` or requesting cancellation; await a
+Scheduler explicitly when RunLoop affinity is required. The event must outlive every waiter.
 
 `auto guard = co_await mutex.lock_async()` acquires `AsyncMutex` without allocating a waiter and
 releases it through RAII. Contended waiters acquire in FIFO order and resume on the releasing
@@ -242,16 +299,61 @@ library.
 
 `RunLoop::run()` consumes one root Task, executes ready coroutines on the calling thread, returns
 its value, and rethrows its exception. `Scheduler::schedule()` always suspends and queues the
-continuation. `schedule_after()` waits for a relative `steady_clock` duration, while
+continuation; its `std::stop_token` overload can cancel that queued wait. `schedule_after()` waits
+for a relative `steady_clock` duration, while
 `schedule_at()` waits for an absolute steady-clock time point; expiry makes work eligible and
 never resumes it inline. Scheduler handles are copyable, but remain tied to their originating
 RunLoop. Sequential `run()` calls are supported; nested or concurrent calls are rejected. A
 moved-from Task must not be awaited.
 
-The timed overloads accepting `std::stop_token` also always suspend. If cancellation wins before
-the deadline, awaiting throws `OperationCancelled`; a late stop request cannot replace an already
-queued deadline completion. The stop callback only wakes the RunLoop, so user coroutine code is
-still resumed by the thread driving `run()`. Cancellation currently performs an O(n) timer lookup.
+All Scheduler overloads accepting `std::stop_token` still queue, including pre-cancelled waits. If
+cancellation wins before consumption, awaiting throws `OperationCancelled`; a late stop request
+cannot replace a completion that already won. The stop callback only wakes the RunLoop, so user
+coroutine code is resumed by the thread driving `run()`. Cancellation currently performs an O(n)
+queue lookup.
+
+`ThreadPool` starts a fixed number of CPU workers. Its copyable Scheduler always suspends and may
+resume a continuation on any worker; explicitly await a `RunLoop::Scheduler` to return to the
+caller thread. `schedule(stop_token)` has the same completion-versus-cancellation winner rule as
+RunLoop ready scheduling. The v1 implementation uses one work-conserving shared FIFO and sleeping
+workers. Destruction closes admission, drains every accepted entry, and joins the workers. It does
+not own higher-level Tasks, and blocking calls still block their current worker.
+
+`run_blocking(blockingWorkers, returnTo, operation, stopToken)` owns a synchronous callable in its
+lazy Task frame, schedules it once to the selected ThreadPool, and publishes its value, `void`,
+exception, or queued cancellation only after scheduling back to `returnTo`. Use a separate
+ThreadPool instance for blocking work so it cannot occupy latency-sensitive CPU workers. A stop
+request can skip work that has not been claimed; it cannot preempt a running synchronous call, and
+the return schedule is intentionally not cancellable. This is thread-based isolation, not native
+non-blocking I/O.
+
+The native TCP surface stays explicit and small:
+
+```cpp
+Task<std::size_t> exchange(
+    IoContext& io,
+    RunLoop::Scheduler caller,
+    std::string_view numericAddress,
+    std::uint16_t port,
+    std::span<const std::byte> request,
+    std::span<std::byte> reply,
+    std::stop_token token = {}) {
+    auto stream = co_await TcpStream::connect(
+        io, caller, numericAddress, port, token);
+    co_await stream.write_all(caller, request, token);
+    co_return co_await stream.read_some(caller, reply, token);
+}
+```
+
+Share one immovable `IoContext` across streams; it owns one private I/O driver. `TcpStream` is
+move-only, and connect accepts numeric IPv4/IPv6 text only—no blocking DNS is hidden inside it.
+Read/write spans borrow their storage until the returned Task completes. Every success or error
+attempts the explicit return-Scheduler hop. One read and one write may coexist; another operation
+in the same direction throws `std::logic_error`. Pre-cancellation leaves an open stream usable,
+while cancellation after `write_all()` starts closes it. `close()` is thread-safe, idempotent, and
+causes accepted operations to complete once with `OperationCancelled` when close wins. Phase 6A
+isolates arbitrary synchronous calls on ThreadPool workers; Phase 6B is native async TCP, not a
+generic async-I/O layer.
 
 RunLoop is not a background thread and does not make blocking code asynchronous. A Task that
 suspends without arranging a future resume can leave `run()` waiting indefinitely. CMP does not
@@ -263,21 +365,32 @@ await the desired Scheduler to return to its RunLoop.
 ```text
 .
 ├── .xlings.json              # pinned project tool environment
-├── mcpp.toml                 # package identity and test dependency
+├── mcpp.toml                 # package identity, runtime, and test dependencies
 ├── src/cmp.cppm              # root module interface
 ├── src/task.cppm             # Task module partition
+├── src/cancellation.cppm     # shared cooperative-cancellation exception
 ├── src/run_loop.cppm         # RunLoop and Scheduler partition
+├── src/thread_pool.cppm      # fixed-size CPU worker scheduler
+├── src/blocking.cppm         # structured blocking-call offload
+├── src/tcp.cppm              # native async TCP client and I/O context
 ├── src/when_all.cppm         # structured concurrent Task join
 ├── src/task_group.cppm       # eager mutable structured Task scope
 ├── src/one_shot_event.cppm   # allocation-free one-time notification
+├── src/async_manual_reset_event.cppm # reusable cancellable notification
 ├── src/async_mutex.cppm      # FIFO coroutine-aware RAII mutex
 ├── tests/cmp_test.cpp        # Task contract and lifetime tests
 ├── tests/run_loop_test.cpp   # scheduler, boundary, and threading tests
+├── tests/thread_pool_test.cpp # worker, cancellation, and shutdown tests
+├── tests/blocking_test.cpp   # blocking offload, affinity, and cancellation tests
+├── tests/tcp_test.cpp        # TCP lifecycle, cancellation, races, and load tests
 ├── tests/when_all_test.cpp   # join ownership, result, and race tests
 ├── tests/task_group_test.cpp # mutable scope lifetime and race tests
 ├── tests/one_shot_event_test.cpp # event publication and race tests
+├── tests/async_manual_reset_event_test.cpp # reusable event race tests
 ├── tests/async_mutex_test.cpp # mutex ownership and hand-off tests
 ├── examples/basic/           # standalone path-dependency consumer
+├── benchmarks/v1-readiness/  # local compute, file, and loopback baseline
+├── benchmarks/thread-pool/   # local multi-worker scheduling baseline
 ├── docs/architecture.md      # current structure, boundaries, and evolution
 └── .github/workflows/        # Linux, macOS, and Windows CI
 ```
@@ -290,8 +403,10 @@ after CMP has a stable runtime API worth demonstrating.
 The local verification path is:
 
 ```bash
-mcpp build --cache=off
-mcpp test --cache=off
+mcpp build --profile dev --strict --cache=off
+mcpp test --profile dev --strict --cache=off
+mcpp build --profile release --strict --cache=off
+mcpp test --profile release --strict --cache=off
 cd examples/basic && mcpp run
 ```
 
@@ -301,6 +416,11 @@ global mcpp installation.
 
 CMP does not track `mcpp.lock`; `.gitignore` enforces that repository policy. Runtime dependencies
 belong in `[dependencies]`; gtest is declared explicitly under `[dev-dependencies.compat]`.
+The current local suite contains 140 tests across ten binaries. The POSIX-only Release pressure
+consumer and its recorded success/failure data are documented in the
+[v1 readiness benchmark](docs/benchmarks/2026-08-29-cmp-v1-readiness.md).
+Multi-worker correctness and performance data are documented in the
+[thread-pool benchmark](docs/benchmarks/2026-08-29-cmp-thread-pool.md).
 
 ## Roadmap
 
@@ -309,11 +429,12 @@ Runtime work is split into independently reviewable phases:
 1. package identity and importable-module bootstrap — implemented;
 2. coroutine task and lifetime semantics — initial `Task` implemented;
 3. a root runner and minimal single-thread scheduler — initially implemented;
-4. monotonic Timer v1, cancellable timed waits, variadic/vector joins, TaskGroup v1, OneShotEvent
-   v1, and AsyncMutex v1 — implemented; recursive scope admission, broader cancellation
-   propagation, and reusable wake-up paths remain;
-5. multi-worker scheduling and work stealing;
-6. asynchronous I/O integration and a blocking pool.
+4. monotonic Timer v1, cancellable ready/timed waits, variadic/vector joins, quiescent TaskGroup,
+   OneShotEvent, AsyncManualResetEvent, and AsyncMutex — implemented and pressure-tested;
+5. fixed-size multi-worker scheduling — implemented and benchmarked; work stealing remains gated
+   by profiling evidence;
+6. structured blocking offload and native async numeric-address TCP client — implemented and
+   verified by Linux, macOS, and Windows CI in PR #10.
 
 The remaining order is directional, not a promise that a listed feature is already implemented.
 

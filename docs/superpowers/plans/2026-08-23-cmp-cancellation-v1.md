@@ -1,6 +1,7 @@
 # CMP Cancellation v1 Implementation Plan
 
 **Date:** 2026-08-23
+**Status:** Complete; merged via PR #4
 **Goal:** Add exactly-once cooperative cancellation to relative and absolute Scheduler waits with
 standard stop tokens, no inline coroutine resumption, and no allocation from stop callbacks.
 **Design:** `docs/superpowers/specs/2026-08-23-cmp-cancellation-v1-design.md`

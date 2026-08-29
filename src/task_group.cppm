@@ -139,6 +139,8 @@ public:
 
     [[nodiscard]] Task<void> join();
 
+    [[nodiscard]] Task<void> cancel_and_join();
+
     [[nodiscard]] std::stop_token get_stop_token() const noexcept {
         return stopSource_.get_token();
     }
@@ -182,13 +184,15 @@ inline void TaskGroup::spawn(Task<void> task) {
     {
         const std::lock_guard lock { mutex_ };
 
-        if (state_ != State::unused && state_ != State::open) {
+        if (state_ == State::joined) {
             throw std::logic_error { "task group is closed" };
         }
 
         tasks_.push_back(std::move(child));
         ++active_;
-        state_ = State::open;
+        if (state_ == State::unused) {
+            state_ = State::open;
+        }
     }
 
     // 锁外启动，立即完成的子任务会回调当前 group。
@@ -252,6 +256,11 @@ inline void TaskGroup::rethrow_first_exception_() {
 
 inline Task<void> TaskGroup::join() {
     co_await JoinAwaiter { *this };
+}
+
+inline Task<void> TaskGroup::cancel_and_join() {
+    request_stop();
+    co_await join();
 }
 
 }  // namespace mcpplibs::cmp

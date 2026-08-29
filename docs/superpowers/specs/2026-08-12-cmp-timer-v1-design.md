@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-12
 **Reviewed:** 2026-08-23
-**Status:** Implemented and locally verified; three-platform CI pending
+**Status:** Implemented and merged via PR #3
 **Base:** `main` at `e729782`
 **Branch:** `feature/timer-v1`
 

@@ -1,7 +1,7 @@
 # CMP RunLoop v1 Design
 
 **Date:** 2026-08-12
-**Status:** Implemented and verified, pending user commit
+**Status:** Implemented and merged via PR #2
 **Base:** `feature/task-v1` at `7e24ee0`
 
 ## Purpose

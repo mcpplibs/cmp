@@ -1,5 +1,7 @@
 # CMP Bootstrap Implementation Plan
 
+**Status:** Complete; merged via PR #1
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Replace the generic `mcpplibs.mylib` scaffold with an import-only CMP C++23 module project, remove premature publishing templates, clean local clice artifacts, and leave a fully verified but uncommitted working tree.

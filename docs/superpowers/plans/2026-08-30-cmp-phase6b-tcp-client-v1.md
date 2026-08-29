@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-30
 **Design:** `docs/superpowers/specs/2026-08-29-cmp-phase6b-tcp-client-v1-design.md`
-**Status:** In progress — load and local cross-platform gate complete
+**Status:** In progress — readiness TCP client migration complete
 **Baseline:** Local Phase 6A commit `701aa8b`, 116/116 Dev and Release tests
 
 ## Execution Rule
@@ -361,6 +361,27 @@ Timing remains local evidence, not a pass threshold.
 Build the benchmark in Release strict mode and run five measured rounds. Record the new raw data in
 `docs/benchmarks/2026-08-29-cmp-v1-readiness.md`, explicitly labeling the server as blocking and the
 client as Phase 6B native async TCP.
+
+**Self-review — 2026-08-30:** Preserve the current workload shape: each of four workers creates one
+ephemeral listener, runs one synchronous accept plus a 5,000-round echo loop through
+`run_blocking()`, and uses one long-lived `TcpStream` for those rounds. All four streams share one
+benchmark `IoContext`; each write and read explicitly returns to the measuring RunLoop. A worker
+owns its listener, server Task, stream, and 256-byte buffers until structured join. For the 25
+failure rounds, keep one bound-but-not-listening socket alive and accept only
+`std::errc::connection_refused` as expected. If a blocking server fails after the client has counted
+every round, convert one success to unexpected failure so hard accounting remains exact. Reuse the
+existing POSIX RAII socket and byte send/receive loops; remove only pair creation and blocking
+client connect/send/receive code. Do not alter compute/file workloads, constants, CSV, or add a
+benchmark dependency.
+
+**Completion — 2026-08-30:** Replaced only the readiness benchmark's blocking client with four
+`TcpStream` clients sharing one `IoContext`. Each worker keeps one long-lived connection for 5,000
+256-byte echoes; its synchronous POSIX accept/read/write server remains isolated through
+`run_blocking()`. One bound non-listening endpoint per worker drives 25 exact
+`connection_refused` outcomes. Compute/file workloads, constants, CSV, and hard accounting are
+unchanged. Release strict cache-off build passed, followed by five final runs in which every
+scenario passed; network was 20,000 successes, 100 expected failures, and zero unexpected failures
+per round. Raw data and the Phase 6A median comparison are recorded in the readiness report.
 
 ## 9. Synchronize the developer documentation
 

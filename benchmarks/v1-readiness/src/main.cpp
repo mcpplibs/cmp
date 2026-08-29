@@ -14,8 +14,10 @@ import mcpplibs.cmp;
 namespace {
 
 using mcpplibs::cmp::RunLoop;
+using mcpplibs::cmp::IoContext;
 using mcpplibs::cmp::Task;
 using mcpplibs::cmp::TaskGroup;
+using mcpplibs::cmp::TcpStream;
 using mcpplibs::cmp::ThreadPool;
 using mcpplibs::cmp::run_blocking;
 
@@ -140,48 +142,31 @@ public:
     return Socket { handle };
 }
 
-[[nodiscard]] std::pair<Socket, Socket> make_loopback_pair() {
-    auto listener = make_socket();
+[[nodiscard]] std::pair<Socket, std::uint16_t> bind_loopback_socket() {
+    auto socket = make_socket();
     sockaddr_in address {};
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
     if (::bind(
-            listener.get(),
+            socket.get(),
             reinterpret_cast<const sockaddr*>(&address),
             sizeof(address)) != 0) {
         throw_socket_error("bind");
     }
 
-    if (::listen(listener.get(), 1) != 0) {
-        throw_socket_error("listen");
-    }
-
     socklen_t addressLength { sizeof(address) };
     if (::getsockname(
-            listener.get(),
+            socket.get(),
             reinterpret_cast<sockaddr*>(&address),
             &addressLength) != 0) {
         throw_socket_error("getsockname");
     }
 
-    auto client = make_socket();
-    if (::connect(
-            client.get(),
-            reinterpret_cast<const sockaddr*>(&address),
-            sizeof(address)) != 0) {
-        throw_socket_error("connect");
-    }
-
-    const int accepted = ::accept(listener.get(), nullptr, nullptr);
-    if (accepted < 0) {
-        throw_socket_error("accept");
-    }
-
-    return { std::move(client), Socket { accepted } };
+    return { std::move(socket), ntohs(address.sin_port) };
 }
 
-void send_all(int socket, std::string_view data) {
+void send_all(int socket, std::span<const std::byte> data) {
     std::size_t offset { 0 };
 
     while (offset < data.size()) {
@@ -197,51 +182,43 @@ void send_all(int socket, std::string_view data) {
     }
 }
 
-[[nodiscard]] std::string receive_exactly(int socket, std::size_t size) {
-    std::string data(size, '\0');
+void receive_exactly(int socket, std::span<std::byte> data) {
     std::size_t offset { 0 };
 
-    while (offset < size) {
+    while (offset < data.size()) {
         const auto received = ::recv(
             socket,
             data.data() + offset,
-            size - offset,
+            data.size() - offset,
             0);
         if (received <= 0) {
             throw_socket_error("recv");
         }
         offset += static_cast<std::size_t>(received);
     }
-
-    return data;
 }
 
-[[nodiscard]] bool non_listening_loopback_connect_is_refused() {
-    auto reservation = make_socket();
-    sockaddr_in address {};
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+void run_echo_server(
+    int listener,
+    const std::array<std::byte, NETWORK_PAYLOAD_SIZE>& payload) {
+    const int acceptedHandle = ::accept(listener, nullptr, nullptr);
 
-    if (::bind(
-            reservation.get(),
-            reinterpret_cast<const sockaddr*>(&address),
-            sizeof(address)) != 0) {
-        throw_socket_error("failure bind");
+    if (acceptedHandle < 0) {
+        throw_socket_error("accept");
     }
 
-    socklen_t addressLength { sizeof(address) };
-    if (::getsockname(
-            reservation.get(),
-            reinterpret_cast<sockaddr*>(&address),
-            &addressLength) != 0) {
-        throw_socket_error("failure getsockname");
+    Socket accepted { acceptedHandle };
+    std::array<std::byte, NETWORK_PAYLOAD_SIZE> request {};
+
+    for (int round { 0 }; round < NETWORK_ROUNDS; ++round) {
+        receive_exactly(accepted.get(), request);
+
+        if (!std::ranges::equal(request, payload)) {
+            throw std::runtime_error { "server payload mismatch" };
+        }
+
+        send_all(accepted.get(), payload);
     }
-    auto probe = make_socket();
-    const int result = ::connect(
-        probe.get(),
-        reinterpret_cast<const sockaddr*>(&address),
-        sizeof(address));
-    return result != 0 && errno == ECONNREFUSED;
 }
 
 Task<void> failing_compute(Scheduler scheduler) {
@@ -349,48 +326,117 @@ Task<void> run_file_io(
     co_await group.join();
 }
 
+Task<void> run_network_worker(
+    IoContext& ioContext,
+    BlockingScheduler blockingWorkers,
+    Scheduler scheduler,
+    std::array<std::byte, NETWORK_PAYLOAD_SIZE> payload,
+    Counters& counters) {
+    auto [listener, port] = bind_loopback_socket();
+
+    if (::listen(listener.get(), 1) != 0) {
+        throw_socket_error("listen");
+    }
+
+    // 服务端继续在线程池阻塞；客户端由 IoContext 原生异步驱动。
+    TaskGroup serverGroup {};
+    serverGroup.spawn(run_blocking(
+        blockingWorkers,
+        scheduler,
+        [listenerHandle = listener.get(), payload] {
+            run_echo_server(listenerHandle, payload);
+        }));
+
+    int completed {};
+
+    try {
+        auto stream = co_await TcpStream::connect(
+            ioContext,
+            scheduler,
+            "127.0.0.1",
+            port);
+        std::array<std::byte, NETWORK_PAYLOAD_SIZE> response {};
+
+        for (; completed < NETWORK_ROUNDS; ++completed) {
+            co_await stream.write_all(scheduler, payload);
+            std::size_t received {};
+
+            while (received < response.size()) {
+                const auto size = co_await stream.read_some(
+                    scheduler,
+                    std::span { response }.subspan(received));
+
+                if (size == 0) {
+                    throw std::runtime_error { "unexpected server EOF" };
+                }
+
+                received += size;
+            }
+
+            if (response != payload) {
+                throw std::runtime_error { "client payload mismatch" };
+            }
+
+            counters.successes_.fetch_add(1);
+        }
+    } catch (...) {
+        counters.unexpectedFailures_.fetch_add(
+            NETWORK_ROUNDS - completed);
+        static_cast<void>(::shutdown(listener.get(), SHUT_RDWR));
+    }
+
+    bool serverFailed {};
+
+    try {
+        co_await serverGroup.join();
+    } catch (...) {
+        serverFailed = true;
+    }
+
+    if (serverFailed && completed == NETWORK_ROUNDS) {
+        counters.successes_.fetch_sub(1);
+        counters.unexpectedFailures_.fetch_add(1);
+    }
+
+    auto [reservation, failurePort] = bind_loopback_socket();
+
+    for (int failure { 0 }; failure < NETWORK_FAILURES; ++failure) {
+        try {
+            static_cast<void>(co_await TcpStream::connect(
+                ioContext,
+                scheduler,
+                "127.0.0.1",
+                failurePort));
+            counters.unexpectedFailures_.fetch_add(1);
+        } catch (const std::system_error& error) {
+            if (error.code() == std::make_error_condition(
+                    std::errc::connection_refused)) {
+                counters.expectedFailures_.fetch_add(1);
+            } else {
+                counters.unexpectedFailures_.fetch_add(1);
+            }
+        } catch (...) {
+            counters.unexpectedFailures_.fetch_add(1);
+        }
+    }
+}
+
 Task<void> run_network_io(
+    IoContext& ioContext,
     BlockingScheduler blockingWorkers,
     Scheduler scheduler,
     Counters& counters) {
-    const std::string payload(NETWORK_PAYLOAD_SIZE, 'n');
+    std::array<std::byte, NETWORK_PAYLOAD_SIZE> payload {};
+    payload.fill(std::byte { static_cast<unsigned char>('n') });
     TaskGroup group {};
 
-    for (int workerIndex { 0 }; workerIndex < NETWORK_WORKERS; ++workerIndex) {
-        static_cast<void>(workerIndex);
-        group.spawn(run_blocking(blockingWorkers, scheduler, [&] {
-            int completed { 0 };
-            try {
-                auto [client, server] = make_loopback_pair();
-                for (; completed < NETWORK_ROUNDS; ++completed) {
-                    send_all(client.get(), payload);
-                    if (receive_exactly(server.get(), payload.size()) != payload) {
-                        throw std::runtime_error { "server payload mismatch" };
-                    }
-
-                    send_all(server.get(), payload);
-                    if (receive_exactly(client.get(), payload.size()) != payload) {
-                        throw std::runtime_error { "client payload mismatch" };
-                    }
-                    counters.successes_.fetch_add(1);
-                }
-            } catch (...) {
-                counters.unexpectedFailures_.fetch_add(
-                    NETWORK_ROUNDS - completed);
-            }
-
-            for (int failure { 0 }; failure < NETWORK_FAILURES; ++failure) {
-                try {
-                    if (non_listening_loopback_connect_is_refused()) {
-                        counters.expectedFailures_.fetch_add(1);
-                    } else {
-                        counters.unexpectedFailures_.fetch_add(1);
-                    }
-                } catch (...) {
-                    counters.unexpectedFailures_.fetch_add(1);
-                }
-            }
-        }));
+    for (int remaining { NETWORK_WORKERS }; remaining > 0; --remaining) {
+        group.spawn(run_network_worker(
+            ioContext,
+            blockingWorkers,
+            scheduler,
+            payload,
+            counters));
     }
 
     co_await group.join();
@@ -444,6 +490,7 @@ void print_metrics(const Metrics& metrics) {
 
 int main() {
     TemporaryDirectory directory {};
+    IoContext ioContext {};
     ThreadPool blockingWorkers {
         std::max(FILE_WORKERS, NETWORK_WORKERS)
     };
@@ -473,6 +520,7 @@ int main() {
         NETWORK_WORKERS * (NETWORK_ROUNDS + NETWORK_FAILURES),
         [&](Scheduler scheduler, Counters& counters) {
             return run_network_io(
+                ioContext,
                 blockingWorkers.get_scheduler(),
                 scheduler,
                 counters);

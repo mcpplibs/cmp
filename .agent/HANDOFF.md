@@ -15,8 +15,8 @@ path-dependency consumer。
 ## 当前目标与状态
 
 Phase 6A blocking offload v1 与 Phase 6B 第 1–5 项已作为本地提交完成，最新为 Step 5
-`a73c113`，Step 6 已提交为 `95ff43e`，均尚未推送。Phase 6B Plan 第 7 项并发负载与本地
-跨平台门禁已实现并通过；下一步是第 8 项 readiness TCP client 迁移。
+`a73c113`，Step 6/7 已提交为 `95ff43e`/`eeb0275`，均尚未推送。Phase 6B Plan 第 8 项
+readiness TCP client 迁移已实现并通过五轮本地压测；下一步是第 9 项开发文档同步。
 
 ## 已完成工作
 
@@ -30,8 +30,9 @@ Phase 6A blocking offload v1 与 Phase 6B 第 1–5 项已作为本地提交完�
   move-only、异常、预取消/排队取消/晚取消、取消竞态、过期与 inactive Scheduler、RunLoop
   响应性，以及 5,000 个并发 offload 的 exactly-once 行为。
 - `examples/basic` 新增独立 blocking ThreadPool，并在协程中打印 `Blocking result: 42`。
-- `benchmarks/v1-readiness` 的文件与回环网络场景已从手写 `jthread` adapter 迁移到一个专用
-  CMP ThreadPool 和 `run_blocking()`；负载及成功/失败硬检查保持不变。
+- `benchmarks/v1-readiness` 的文件场景及同步回环 server 使用一个专用 CMP ThreadPool 和
+  `run_blocking()`；网络 client 已迁移到共享 `IoContext` 与 `TcpStream`，负载及成功/失败
+  硬检查保持不变。
 - 三份 README、三份架构文档、Phase 6A Design/Plan 和 v1 readiness 数据报告已同步到实现
   事实。
 - 完成 Phase 6B 依赖核查：mcpp-index 当前提供 `chriskohlhoff.asio@1.38.1`，其 C++23 模块
@@ -95,6 +96,9 @@ Phase 6A blocking offload v1 与 Phase 6B 第 1–5 项已作为本地提交完�
   context drain/join 和 surviving handle 边界，当前 `tcp_test` 为 23 项。
 - 现有 loopback fixture 支持固定连接数；新增 32 客户端并发 echo 测试，每个 Task 独立持有
   stream/缓冲区并逐槽核对完成次数、结果、payload 与 RunLoop 返回线程。
+- readiness 的四个 client 各保持一条长连接完成 5,000 次 256B echo，共享一个 I/O driver；
+  四个同步 POSIX server 仍各占一个 blocking worker，100 次故障连接只接受
+  `connection_refused`。
 
 ## 重要决策
 
@@ -159,8 +163,8 @@ Phase 6A blocking offload v1 与 Phase 6B 第 1–5 项已作为本地提交完�
 - Dev 定向 `blocking_test`：11/11 通过。
 - Release `CancellationRaceInvokesAtMostOnce` 连续执行 100 轮：100/100 通过。
 - `examples/basic` 的 `mcpp run`：通过，包含 `Blocking result: 42`，退出码 0。
-- `benchmarks/v1-readiness` Release strict 构建通过；迁移后执行 5 轮，compute、file_io 和
-  network_loopback 每轮均 PASS，五轮非预期失败总数为 0。
+- `benchmarks/v1-readiness` Phase 6B client 迁移后 Release strict cache-off 构建通过；最终
+  执行 5 轮，compute、file_io 和 network_loopback 每轮均 PASS，五轮非预期失败总数为 0。
 - 文件/网络每轮计数分别为 1,000/20,000 成功、100/100 预期失败、0 非预期失败；原始耗时和
   吞吐已写入 benchmark 报告。
 - 当前 mcpp 仍输出 SubOS 缺少 `subos_info` 的既有环境提示，但所有构建和运行成功。
@@ -191,6 +195,8 @@ Phase 6A blocking offload v1 与 Phase 6B 第 1–5 项已作为本地提交完�
   500 次 stop/completion 竞态，没有丢失或重复完成。
 - 加入并发负载后，`tcp_test` Dev/Release 均为 24/24；两套 strict cache-off 全量测试均为
   10 个二进制、140/140。32/32 客户端成功，取消、错误、payload/线程不匹配和重复完成均为 0。
+- readiness 新网络路径每轮均为 20,000 成功、100 预期失败、0 非预期失败；五轮网络中位数
+  为 2,071.085 ms / 9,705.1 ops/s，原始结果已写入 benchmark 报告，耗时不作门槛。
 
 ## 已知问题 / 风险
 
@@ -204,18 +210,18 @@ Phase 6A blocking offload v1 与 Phase 6B 第 1–5 项已作为本地提交完�
 - `chriskohlhoff.asio@1.38.1` 只在本机 Linux/WSL2 + LLVM 22.1.8 完成模块编译；macOS 与
   Windows 仍需后续远程 CI 验证。
 - Phase 6B 本地已有 backend、`IoContext`、native bridge、connect/read/write、EOF/overlap、
-  pending cancellation、close/is_open、shutdown 竞态与 32 客户端负载；readiness TCP client
-  迁移、文档同步和最终本地矩阵仍待后续步骤。
+  pending cancellation、close/is_open、shutdown 竞态、32 客户端负载及 readiness TCP client
+  迁移；六份开发文档同步和最终本地矩阵仍待后续步骤。
 - 单 I/O driver 是 v1 的刻意简化；只有 benchmark 证明它是瓶颈后才设计多 driver/strand。
 
 ## 剩余工作
 
-1. 按 Phase 6B Plan 第 8 项只迁移 readiness 的 TCP client，保留同步 server、compute/file
-   场景、常量、CSV 和硬计数。
-2. 继续第 9–10 项：同步六份开发文档并执行完整本地验证矩阵与五轮 benchmark。
+1. 按 Phase 6B Plan 第 9 项同步三份 README 与三份 architecture，准确说明 API、buffer
+   生命周期、并发/取消/关闭语义和 Phase 6A/6B 边界。
+2. 继续第 10 项：执行完整本地验证矩阵、example、100 轮竞态门禁与五轮 benchmark。
 3. 本地完成后仍需用户另行授权 push/PR，才能取得 Linux、macOS、Windows 远程 CI 结果。
 
 ## 推荐下一步
 
-按 `2026-08-30-cmp-phase6b-tcp-client-v1.md` 开始第 8 项，用共享 `IoContext`/`TcpStream` 替换
-readiness 的阻塞 TCP client；同步 loopback server 继续使用 `run_blocking()`。
+按 `2026-08-30-cmp-phase6b-tcp-client-v1.md` 开始第 9 项，先从已验证的 public API/Design
+提炼一份英文内容，再等义同步简中与繁中版本，不修改 example 的确定性行为。

@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-30
 **Design:** `docs/superpowers/specs/2026-08-29-cmp-phase6b-tcp-client-v1-design.md`
-**Status:** Locally complete — remote CI pending
+**Status:** Complete; local and Linux/macOS/Windows CI verified in PR #10
 **Baseline:** Local Phase 6A commit `701aa8b`, 116/116 Dev and Release tests
 
 ## Execution Rule
@@ -441,7 +441,7 @@ Only after local verification:
 - update `.agent/HANDOFF.md` with implementation facts, remaining remote CI, and known limits.
 
 Phase 6B reaches the Design's final completion state only after Linux, macOS, and Windows CI all
-pass. Until then, report it as locally implemented and verified with remote compatibility pending.
+pass. PR #10 now satisfies that gate.
 
 **Self-review — 2026-08-30:** Run the two existing internally repeated Release race tests five
 times, which exercises 100 close/completion and 500 stop/completion races without multiplying the
@@ -450,7 +450,7 @@ invalid outcome, failed command, or hard-count mismatch stops the gate. Then run
 cache-off strict Dev/Release matrix, the unchanged path-consumer example, and a Release benchmark
 build followed by five sequential runs of the produced binary. Benchmark timing is evidence only;
 each run must retain exact compute/file/network success and expected-failure counts with zero
-unexpected failures. Record only local Linux/WSL2 facts and leave remote CI pending.
+unexpected failures. Record the local Linux/WSL2 facts here; record the remote result separately.
 
 **Completion — 2026-08-30:** The focused Release command was:
 
@@ -464,7 +464,12 @@ including 24/24 TCP tests. The unchanged standalone example printed every expect
 0. The readiness Release build passed, followed by five sequential runs: each reported compute
 49,000/1,000/0, file 1,000/100/0, and network 20,000/100/0 success/expected/unexpected counts.
 All 15 scenario rows passed; the final raw timings are recorded in the readiness report. These are
-local Linux/WSL2 + LLVM 22.1.8 results; Linux, macOS, and Windows remote CI remain pending.
+the local Linux/WSL2 + LLVM 22.1.8 results.
+
+**Remote completion — 2026-08-30:** PR #10 commit `7c81a10` installed xlings `2026.8.27.5` and
+mcpp `2026.8.28.1`, then built CMP, passed all 10 test binaries, and ran `examples/basic` on Linux
+x86_64, macOS arm64, and Windows x86_64. The three checks completed successfully in 2m32s, 2m42s,
+and 2m10s respectively.
 
 ## Scope Guard
 

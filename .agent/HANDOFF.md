@@ -24,9 +24,9 @@ Phase 4、Phase 5、Phase 6A 和 Phase 6B 第 1–10 项均已本地完成。当
 <https://github.com/mcpplibs/cmp/pull/10>
 
 PR 初次检查中，macOS arm64 与 Windows x86_64 已通过；Linux x86_64 在编译 CMP 前因
-mcpp/xlings 冷缓存运行时绑定失配失败。专用 Spec/Plan 已完成、自审并通过本地门禁；修复正
-交付到 PR #10，新的三平台结果待确认。用户已授权本次远程读取、当前分支推送和 PR 操作，
-未授权合并。
+mcpp/xlings 冷缓存运行时绑定失配失败。修复提交 `7c81a10` 已推送；随后 Linux、macOS、
+Windows 三项 CI 全部通过，Phase 5 与 Phase 6B 的远程交付门已满足。当前只剩同步最终状态
+文档、推送并确认文档提交后的 CI。用户未授权合并。
 
 ## 已完成工作
 
@@ -46,6 +46,8 @@ mcpp/xlings 冷缓存运行时绑定失配失败。专用 Spec/Plan 已完成、
   `2.44.2`。官方 mcpp `2026.8.28.1` 固定 xlings `2026.8.27.5` 并包含版本精化兼容路径。
 - 自审时纠正“只提升 mcpp”的初稿：Linux 日志证明 mcpp 冷启动会复制 workflow 的系统
   xlings，因此同时提升 `.xlings.json` 与三个 workflow pin，其他步骤不变。
+- 提交并推送 `7c81a10 修复 CI 冷缓存工具链`；PR #10 的三个冷环境均安装 xlings
+  `2026.8.27.5` 和 mcpp `2026.8.28.1`，完成构建、10 个测试二进制与独立示例。
 
 ## 重要决策
 
@@ -82,8 +84,9 @@ mcpp/xlings 冷缓存运行时绑定失配失败。专用 Spec/Plan 已完成、
   重复完成。
 - readiness Release 五轮共 15 行场景全部 PASS，非预期失败为 0；网络中位数
   2,078.127 ms / 9,672.2 ops/s。
-- PR #10 首轮 CI：macOS、Windows 通过；Linux 因旧工具冷缓存失配失败。修复后的远程 CI
-  尚未执行。
+- PR #10 首轮 CI：macOS、Windows 通过；Linux 因旧工具冷缓存失配失败，CMP 未开始编译。
+- PR #10 修复后 CI：Linux x86_64、macOS arm64、Windows x86_64 全部通过，耗时分别为
+  2m32s、2m42s、2m10s；各平台均为 10 个测试二进制、0 个失败，示例输出成功。
 
 ## 已知问题 / 风险
 
@@ -91,19 +94,15 @@ mcpp/xlings 冷缓存运行时绑定失配失败。专用 Spec/Plan 已完成、
   `2026.8.28.1` 会提示 runtime facts inconclusive，但本地 LLVM 双配置构建、测试与示例
   均成功。没有为本次验证修改用户的全局 xlings；远程 workflow 会在冷环境直接安装
   `2026.8.27.5`。
-- 工具版本修复只有在新一轮 Linux 冷缓存 CI 通过后才能视为完成。
 - 运行中的 blocking callable 不可抢占；永久阻塞会占用 worker。
 - ThreadPool 是无界共享 FIFO；应用需要限制持续生产时的结构化 in-flight 数量。
 - 单 I/O driver 是 v1 简化；尚无基准证据要求扩展。
 
 ## 剩余工作
 
-1. 将本地修复交付到 PR #10，并等待 Linux、macOS、Windows 新一轮检查全部通过。
-2. 按实际远程结果更新 README、Phase 6B/工具修复文档与本 HANDOFF；再次提交、推送并确认
-   最终 CI。
-3. 不合并 PR #10，除非用户另行明确授权。
+1. 提交并推送最终状态文档，确认 PR #10 文档提交后的 Linux、macOS、Windows CI。
+2. 不合并 PR #10，除非用户另行明确授权。
 
 ## 推荐下一步
 
-提交并推送当前冷缓存工具链修复，然后监控 PR #10 三平台检查；若失败，只处理日志证实的
-兼容问题。
+提交并推送最终状态文档，然后确认 PR #10 三平台 checks 保持全绿；未经授权不合并。

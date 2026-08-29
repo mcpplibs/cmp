@@ -1,7 +1,7 @@
 # CMP Phase 5 Thread Pool v1 Design
 
 **Date:** 2026-08-29
-**Status:** Implemented and locally verified
+**Status:** Implemented; local and Linux/macOS/Windows CI verified
 **Baseline:** Phase 4 is implemented and locally verified with 90/90 tests
 
 ## Purpose
@@ -314,8 +314,8 @@ sleeping workers, leaving a nominally multi-threaded pool non-work-conserving.
 
 ## Acceptance Criteria
 
-Phase-5 v1 is complete locally: the module, tests, example, benchmark report, and
+Phase-5 v1 is complete: the module, tests, example, benchmark report, and
 English/Simplified-Chinese/Traditional-Chinese public documentation agree; Dev and Release strict
 builds and all 105 tests pass; the standalone example succeeds; and five local Release benchmark
-rounds contain zero unexpected failures. Remote three-platform CI remains delivery verification,
-not a locally claimed result.
+rounds contain zero unexpected failures. PR #10 subsequently built the current library, ran the
+current 140-test suite, and ran the standalone example successfully on Linux, macOS, and Windows.

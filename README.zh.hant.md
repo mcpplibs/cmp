@@ -406,8 +406,8 @@ CMP 目前不追蹤 `mcpp.lock`，`.gitignore` 明確執行這項儲存庫約定
 4. 單調時鐘 Timer v1、可取消就緒/定時等待、變參/vector 匯合、靜止點 TaskGroup、
    OneShotEvent、AsyncManualResetEvent 和 AsyncMutex——已實作並完成壓力驗證；
 5. 固定大小的多 worker 排程——已實作並完成壓測；work stealing 仍需 profiling 證據；
-6. 結構化阻塞 offload——已實作；數值位址原生非同步 TCP client——已完成本機實作與驗證，
-   遠端三平台 CI 仍待確認。
+6. 結構化阻塞 offload 與數值位址原生非同步 TCP client——已實作，並由 PR #10 的 Linux、
+   macOS 和 Windows CI 驗證。
 
 剩餘順序只是方向，不代表列出的能力已經實作。
 

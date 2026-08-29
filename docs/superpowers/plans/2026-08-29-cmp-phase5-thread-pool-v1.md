@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-29
 **Design:** `docs/superpowers/specs/2026-08-29-cmp-phase5-thread-pool-v1-design.md`
-**Status:** Complete; local verification passed
+**Status:** Complete; local and Linux/macOS/Windows CI verified
 
 ## Completion record
 
@@ -12,6 +12,8 @@ the complete 105-test suite pass; the focused Release suite passed 30 consecutiv
 benchmark rounds completed 8,410,240 operations with zero unexpected failures. Coarse CPU work
 scaled by about 7.56x from one to eight workers, while tiny-task contention confirmed the documented
 v1 ceiling. Work stealing was therefore not added without a separate representative profiling case.
+PR #10 later passed the current build, 140-test suite, and standalone example on all three CI
+platforms.
 
 ## 1. Preserve and re-check the phase-4 baseline
 

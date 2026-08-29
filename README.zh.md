@@ -406,8 +406,8 @@ CMP 当前不跟踪 `mcpp.lock`，`.gitignore` 明确执行这一仓库约定。
 4. 单调时钟 Timer v1、可取消就绪/定时等待、变参/vector 汇合、静止点 TaskGroup、
    OneShotEvent、AsyncManualResetEvent 和 AsyncMutex——已实现并完成压力验证；
 5. 固定大小的多 worker 调度——已实现并完成压测；work stealing 仍需 profiling 证据；
-6. 结构化阻塞 offload——已实现；数值地址原生异步 TCP client——已完成本地实现与验证，
-   远程三平台 CI 仍待确认。
+6. 结构化阻塞 offload 与数值地址原生异步 TCP client——已实现，并由 PR #10 的 Linux、
+   macOS 和 Windows CI 验证。
 
 剩余顺序只是方向，不代表列出的能力已经实现。
 

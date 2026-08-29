@@ -2,7 +2,7 @@
 
 **日期：** 2026-08-30
 **设计：** `docs/superpowers/specs/2026-08-30-cmp-ci-cold-cache-toolchain-design.md`
-**状态：** 执行中
+**状态：** 完成
 
 ## 执行规则
 
@@ -20,6 +20,6 @@
 - [x] 运行 Dev/Release 严格无缓存构建和完整测试：两套均为 140/140。
 - [x] 运行 `examples/basic`，全部既有输出与退出状态正确。
 - [x] 自审最终差异并更新 HANDOFF；纠正 workflow 中已过时的版本下限注释。
-- [ ] 本地提交并推送当前分支。
-- [ ] 等待 PR #10 的 Linux、macOS、Windows 检查全部通过。
-- [ ] 根据实际远程结果同步项目当前状态文档。
+- [x] 本地提交并推送当前分支：`7c81a10 修复 CI 冷缓存工具链`。
+- [x] PR #10 的 Linux、macOS、Windows 检查全部通过。
+- [x] 根据实际远程结果同步项目当前状态文档。

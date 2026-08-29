@@ -1,5 +1,7 @@
 # CMP RunLoop v1 Implementation Plan
 
+**Status:** Complete; merged via PR #2
+
 **Goal:** Add the smallest scheduler-aware root execution API that makes Task convenient to use
 while keeping lifetime, synchronization, and failure handling inside CMP.
 

@@ -1,7 +1,7 @@
 # CMP Cancellation v1 Design
 
 **Date:** 2026-08-23
-**Status:** Implemented; local and Linux/macOS/Windows CI verified
+**Status:** Implemented, Linux/macOS/Windows CI verified, and merged via PR #4
 **Base:** `main` at `c06705c`
 **Branch:** `feature/cancellation-v1`
 

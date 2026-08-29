@@ -16,6 +16,7 @@ path-dependency consumer。
 
 Phase 6A blocking offload v1 与 Phase 6B 第 1–10 项均已在当前分支本地完成且尚未推送。Phase
 6B 完整本地门禁已全部通过，Design/Plan 已标记为“本地实现并验证，远程 CI 待确认”。
+已审查全部现有 Spec/Plan；除 Phase 6B 远程门禁外，没有其他已批准但尚未执行的本地任务。
 
 ## 已完成工作
 
@@ -34,6 +35,8 @@ Phase 6A blocking offload v1 与 Phase 6B 第 1–10 项均已在当前分支本
   硬检查保持不变。
 - 三份 README 与三份架构文档已同步 `IoContext`/`TcpStream` API、生命周期、并发/取消边界、
   10 个测试二进制/140 项测试及 readiness 结果；Phase 6A Design/Plan 和数据报告也与实现一致。
+- 根据本地 `main` 的 PR #1–#4 合并提交，纠正 bootstrap、RunLoop、Timer、Cancellation 早期
+  Design/Plan 的陈旧状态；未推断未留存的 Timer 远程检查明细。
 - 完成 Phase 6B 依赖核查：mcpp-index 当前提供 `chriskohlhoff.asio@1.38.1`，其 C++23 模块
   `asio` 覆盖 Linux、macOS 和 Windows，能够复用 epoll、kqueue 与 IOCP 后端。
 - 新增并批准 Phase 6B TCP client v1 Design，确定首个原生异步 I/O 切片仅包含数值地址 TCP

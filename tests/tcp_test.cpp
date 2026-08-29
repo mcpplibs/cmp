@@ -48,35 +48,54 @@ private:
     std::binary_semaphore acceptedSignal_ { 0 };
     std::latch release_ { 1 };
     std::atomic<bool> accepted_ { false };
+    std::size_t connectionCount_ { 1 };
+    std::atomic<std::size_t> remainingConnections_ { 1 };
     Protocol protocol_ {};
     std::jthread worker_ {};
 
     void run_() noexcept {
         ready_.release();
 
-        asio::ip::tcp::socket socket { ioContext_ };
-        std::error_code error {};
-        acceptor_.accept(socket, error);
+        // 服务端串行处理会话；客户端仍在同一 IoContext 上并发等待。
+        for (std::size_t index {}; index < connectionCount_; ++index) {
+            asio::ip::tcp::socket socket { ioContext_ };
+            std::error_code error {};
+            acceptor_.accept(socket, error);
 
-        if (error) {
-            return;
-        }
+            if (error) {
+                return;
+            }
 
-        accepted_.store(true, std::memory_order_release);
-        acceptedSignal_.release();
+            const auto remaining = remainingConnections_.fetch_sub(
+                1,
+                std::memory_order_acq_rel);
 
-        if (protocol_) {
-            std::invoke(protocol_, socket);
-        } else {
-            release_.wait();
+            if (remaining == 0) {
+                std::terminate();
+            }
+
+            accepted_.store(true, std::memory_order_release);
+
+            if (remaining == connectionCount_) {
+                acceptedSignal_.release();
+            }
+
+            if (protocol_) {
+                std::invoke(protocol_, socket);
+            } else {
+                release_.wait();
+            }
         }
     }
 
 public:
     explicit LoopbackServer(
         const asio::ip::address& address,
-        Protocol protocol = {})
-        : protocol_ { std::move(protocol) } {
+        Protocol protocol = {},
+        std::size_t connectionCount = 1)
+        : connectionCount_ { connectionCount },
+          remainingConnections_ { connectionCount },
+          protocol_ { std::move(protocol) } {
         const asio::ip::tcp::endpoint requested { address, 0 };
         acceptor_.open(requested.protocol(), startError_);
 
@@ -130,7 +149,11 @@ public:
 
         release_.count_down();
 
-        if (!accepted_.load(std::memory_order_acquire)) {
+        const auto remaining = remainingConnections_.load(
+            std::memory_order_acquire);
+
+        // 失败路径唤醒未完成的 accept，避免 fixture 析构挂起。
+        for (std::size_t index {}; index < remaining; ++index) {
             asio::io_context wakeContext {};
             asio::ip::tcp::socket wakeSocket { wakeContext };
             std::error_code ignored {};
@@ -693,6 +716,122 @@ Task<RaceCounts> run_stop_completion_races(
             ++counts.completed_;
         } else {
             ++counts.invalid_;
+        }
+    }
+
+    co_return counts;
+}
+
+enum class LoadOutcome {
+    succeeded,
+    cancelled,
+    error
+};
+
+struct LoadClientObservation final {
+    int completions_ {};
+    LoadOutcome outcome_ { LoadOutcome::error };
+    std::thread::id resumedThread_ {};
+};
+
+Task<void> run_echo_client(
+    IoContext& context,
+    RunLoop::Scheduler returnTo,
+    std::uint16_t port,
+    std::size_t clientIndex,
+    LoadClientObservation& observation) {
+    const std::array request {
+        std::byte { 0x43 },
+        std::byte { 0x4d },
+        std::byte { static_cast<unsigned char>(clientIndex) },
+        std::byte {
+            static_cast<unsigned char>(clientIndex ^ 0x5aU)
+        }
+    };
+    std::array<std::byte, request.size()> reply {};
+
+    try {
+        auto stream = co_await TcpStream::connect(
+            context,
+            returnTo,
+            "127.0.0.1",
+            port);
+        co_await stream.write_all(returnTo, request);
+
+        std::size_t received {};
+
+        while (received < reply.size()) {
+            const auto size = co_await stream.read_some(
+                returnTo,
+                std::span { reply }.subspan(received));
+
+            if (size == 0) {
+                break;
+            }
+
+            received += size;
+        }
+
+        observation.outcome_ =
+            received == reply.size() && reply == request
+            ? LoadOutcome::succeeded
+            : LoadOutcome::error;
+    } catch (const OperationCancelled&) {
+        observation.outcome_ = LoadOutcome::cancelled;
+    } catch (...) {
+        observation.outcome_ = LoadOutcome::error;
+    }
+
+    ++observation.completions_;
+    observation.resumedThread_ = std::this_thread::get_id();
+}
+
+struct LoadCounts final {
+    int completions_ {};
+    int succeeded_ {};
+    int cancelled_ {};
+    int errors_ {};
+    int invalidCompletions_ {};
+    int wrongThread_ {};
+};
+
+Task<LoadCounts> run_concurrent_echo_clients(
+    IoContext& context,
+    RunLoop::Scheduler returnTo,
+    std::uint16_t port,
+    std::size_t clientCount) {
+    const auto expectedThread = std::this_thread::get_id();
+    std::vector<LoadClientObservation> observations(clientCount);
+    TaskGroup group {};
+
+    for (std::size_t index {}; index < clientCount; ++index) {
+        group.spawn(run_echo_client(
+            context,
+            returnTo,
+            port,
+            index,
+            observations[index]));
+    }
+
+    co_await group.join();
+
+    LoadCounts counts {};
+
+    for (const auto& observation : observations) {
+        counts.completions_ += observation.completions_;
+        counts.invalidCompletions_ += observation.completions_ != 1;
+        counts.wrongThread_ += observation.resumedThread_ != expectedThread;
+
+        switch (observation.outcome_) {
+        case LoadOutcome::succeeded:
+            ++counts.succeeded_;
+            break;
+        case LoadOutcome::cancelled:
+            ++counts.cancelled_;
+            break;
+        case LoadOutcome::error:
+            ++counts.errors_;
+            break;
         }
     }
 
@@ -1527,6 +1666,62 @@ TEST(CmpTcpTest, ContextShutdownDrainsPendingReadAndClosesSurvivor) {
         loop.run(stream.write_all(loop.get_scheduler(), buffer)),
         std::logic_error);
     EXPECT_NO_THROW(stream.close());
+}
+
+TEST(CmpTcpTest, ManyConcurrentClientsCompleteExactlyOnce) {
+    constexpr std::size_t CLIENT_COUNT { 32 };
+    constexpr std::size_t PAYLOAD_SIZE { 4 };
+    std::atomic<int> serverCompletions {};
+    std::atomic<int> serverErrors {};
+    LoopbackServer server {
+        asio::ip::address_v4::loopback(),
+        [&](asio::ip::tcp::socket& socket) {
+            std::array<std::byte, PAYLOAD_SIZE> buffer {};
+            std::error_code error {};
+            const auto received = asio::read(
+                socket,
+                asio::buffer(buffer),
+                error);
+            std::size_t written {};
+
+            if (!error && received == buffer.size()) {
+                written = asio::write(
+                    socket,
+                    asio::buffer(buffer),
+                    error);
+            }
+
+            if (error ||
+                received != buffer.size() ||
+                written != buffer.size()) {
+                serverErrors.fetch_add(1, std::memory_order_relaxed);
+            }
+
+            serverCompletions.fetch_add(1, std::memory_order_release);
+        },
+        CLIENT_COUNT
+    };
+    ASSERT_TRUE(server.available()) << server.start_error().message();
+    ASSERT_TRUE(server.wait_until_ready());
+
+    IoContext context {};
+    RunLoop loop {};
+    const auto counts = loop.run(run_concurrent_echo_clients(
+        context,
+        loop.get_scheduler(),
+        server.port(),
+        CLIENT_COUNT));
+
+    EXPECT_EQ(counts.completions_, static_cast<int>(CLIENT_COUNT));
+    EXPECT_EQ(counts.succeeded_, static_cast<int>(CLIENT_COUNT));
+    EXPECT_EQ(counts.cancelled_, 0);
+    EXPECT_EQ(counts.errors_, 0);
+    EXPECT_EQ(counts.invalidCompletions_, 0);
+    EXPECT_EQ(counts.wrongThread_, 0);
+    EXPECT_EQ(
+        serverCompletions.load(std::memory_order_acquire),
+        static_cast<int>(CLIENT_COUNT));
+    EXPECT_EQ(serverErrors.load(std::memory_order_relaxed), 0);
 }
 
 }  // namespace

@@ -15,8 +15,8 @@ path-dependency consumer。
 ## 当前目标与状态
 
 Phase 6A blocking offload v1 与 Phase 6B 第 1–5 项已作为本地提交完成，最新为 Step 5
-`a73c113`，均尚未推送。Phase 6B Plan 第 6 项 close/cancellation/shutdown 竞态已实现并通过
-本地门禁；下一步是第 7 项并发负载与跨平台门禁准备。
+`a73c113`，Step 6 已提交为 `95ff43e`，均尚未推送。Phase 6B Plan 第 7 项并发负载与本地
+跨平台门禁已实现并通过；下一步是第 8 项 readiness TCP client 迁移。
 
 ## 已完成工作
 
@@ -93,6 +93,8 @@ Phase 6A blocking offload v1 与 Phase 6B 第 1–5 项已作为本地提交完�
   获胜时稳定得到 `OperationCancelled`，而无关 socket error 仍保留 `system_error`。
 - TCP 测试新增 active/pre-cancellation、关闭幂等、move、write cancellation、两类完成竞态、
   context drain/join 和 surviving handle 边界，当前 `tcp_test` 为 23 项。
+- 现有 loopback fixture 支持固定连接数；新增 32 客户端并发 echo 测试，每个 Task 独立持有
+  stream/缓冲区并逐槽核对完成次数、结果、payload 与 RunLoop 返回线程。
 
 ## 重要决策
 
@@ -187,6 +189,8 @@ Phase 6A blocking offload v1 与 Phase 6B 第 1–5 项已作为本地提交完�
   cache-off 全量测试均为 10 个二进制、139/139 通过。
 - Release 两项完成竞态连续执行 5 轮共 10/10 测试通过，覆盖 100 次 close/completion 与
   500 次 stop/completion 竞态，没有丢失或重复完成。
+- 加入并发负载后，`tcp_test` Dev/Release 均为 24/24；两套 strict cache-off 全量测试均为
+  10 个二进制、140/140。32/32 客户端成功，取消、错误、payload/线程不匹配和重复完成均为 0。
 
 ## 已知问题 / 风险
 
@@ -200,18 +204,18 @@ Phase 6A blocking offload v1 与 Phase 6B 第 1–5 项已作为本地提交完�
 - `chriskohlhoff.asio@1.38.1` 只在本机 Linux/WSL2 + LLVM 22.1.8 完成模块编译；macOS 与
   Windows 仍需后续远程 CI 验证。
 - Phase 6B 本地已有 backend、`IoContext`、native bridge、connect/read/write、EOF/overlap、
-  pending cancellation、close/is_open 与 shutdown 竞态；并发负载、readiness TCP client 迁移、
-  文档同步和最终本地矩阵仍待后续步骤。
+  pending cancellation、close/is_open、shutdown 竞态与 32 客户端负载；readiness TCP client
+  迁移、文档同步和最终本地矩阵仍待后续步骤。
 - 单 I/O driver 是 v1 的刻意简化；只有 benchmark 证明它是瓶颈后才设计多 driver/strand。
 
 ## 剩余工作
 
-1. 按 Phase 6B Plan 第 7 项增加有界的多客户端并发负载测试，并完成两类竞态各至少 100 轮的
-   Release 门禁。
-2. 继续第 8–10 项：迁移 readiness TCP client、同步六份开发文档并执行完整本地验证矩阵。
+1. 按 Phase 6B Plan 第 8 项只迁移 readiness 的 TCP client，保留同步 server、compute/file
+   场景、常量、CSV 和硬计数。
+2. 继续第 9–10 项：同步六份开发文档并执行完整本地验证矩阵与五轮 benchmark。
 3. 本地完成后仍需用户另行授权 push/PR，才能取得 Linux、macOS、Windows 远程 CI 结果。
 
 ## 推荐下一步
 
-按 `2026-08-30-cmp-phase6b-tcp-client-v1.md` 开始第 7 项，在现有 loopback fixture 内加入
-跨平台有界并发客户端门禁，不增加 public server、通用 executor 或新依赖。
+按 `2026-08-30-cmp-phase6b-tcp-client-v1.md` 开始第 8 项，用共享 `IoContext`/`TcpStream` 替换
+readiness 的阻塞 TCP client；同步 loopback server 继续使用 `run_blocking()`。

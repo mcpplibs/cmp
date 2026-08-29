@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-30
 **Design:** `docs/superpowers/specs/2026-08-29-cmp-phase6b-tcp-client-v1-design.md`
-**Status:** In progress — cancellation/close/shutdown gate complete
+**Status:** In progress — load and local cross-platform gate complete
 **Baseline:** Local Phase 6A commit `701aa8b`, 116/116 Dev and Release tests
 
 ## Execution Rule
@@ -319,6 +319,26 @@ The existing Linux/macOS/Windows workflows already build the root package and au
 `tests/tcp_test.cpp`; do not edit them merely to name the new test. Remote three-platform results
 remain an acceptance gate and can be recorded only after the user separately authorizes the
 required remote workflow.
+
+**Self-review — 2026-08-30:** Use 32 IPv4 clients: this admits many simultaneous connect/read/write
+operations on the one driver while staying well below hosted-CI and local ephemeral-port limits.
+Extend the existing synchronous fixture with an expected connection count and process tiny echo
+sessions sequentially on its test thread; the clients remain concurrent because all Tasks start
+before the group joins. Each client coroutine owns its stream and request/reply arrays, writes one
+unique payload, reads until that payload is complete, and records exactly one success,
+cancellation, or error in its own result slot. Aggregate completion, outcome, payload, and return-
+thread counts only after structured join. Keep the existing internally repeated race tests; five
+focused binary repetitions represent 100 close races and 500 stop races without creating 100
+copies of their already-repeated inner loops. No workflow or production API change belongs here.
+
+**Completion — 2026-08-30:** Extended the existing test fixture with a bounded connection count
+and added one 32-client IPv4 echo load. All client Tasks start before structured join; every Task
+owns its stream and buffers, verifies its unique echo, returns to the RunLoop thread, and records
+one outcome. Focused Dev/Release passed 24/24 with 32/32 successes and zero cancellations, errors,
+affinity mismatches, or duplicate completions. Both full strict cache-off suites passed 140/140
+across 10 binaries. Five focused Release repetitions passed 10/10 race tests, covering 100 close
+races and 500 stop races. No production API or workflow changed; macOS/Windows confirmation remains
+a separately authorized remote CI gate.
 
 ## 8. Migrate only the readiness TCP client
 

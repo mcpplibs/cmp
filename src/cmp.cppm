@@ -5,6 +5,7 @@ export import :task;
 export import :run_loop;
 export import :thread_pool;
 export import :blocking;
+export import :tcp;
 export import :when_all;
 export import :task_group;
 export import :one_shot_event;

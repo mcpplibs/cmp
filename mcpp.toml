@@ -13,3 +13,6 @@ default = "llvm@22.1.8"
 
 [dev-dependencies.compat]
 gtest = "1.15.2"
+
+[dependencies.chriskohlhoff]
+asio = "1.38.1"

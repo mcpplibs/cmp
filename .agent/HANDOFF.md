@@ -5,15 +5,18 @@
 CMP 是使用 mcpp 构建的 C++23 Modules 协程运行时库，公开模块为 `mcpplibs.cmp`。当前已实现
 懒启动单消费者 `Task<T>`、变参/vector `when_all()`、静止点 `TaskGroup`、一次性与可复用
 事件、RAII `AsyncMutex`、带定时和取消的调用线程 `RunLoop`、固定大小的 `ThreadPool`，以及
-用于隔离同步调用的 `run_blocking()`。
+用于隔离同步调用的 `run_blocking()`。Phase 6B 已加入拥有单一私有 I/O driver 的
+`IoContext` 生命周期骨架。
 
-`.xlings.json` 固定 mcpp 2026.8.11.2；当前工具链为 LLVM 22.1.8，测试依赖为
-`compat.gtest` 1.15.2。`examples/basic` 是独立 path-dependency consumer。
+`.xlings.json` 固定 mcpp 2026.8.11.2；当前工具链为 LLVM 22.1.8，运行时依赖为
+`chriskohlhoff.asio` 1.38.1，测试依赖为 `compat.gtest` 1.15.2。`examples/basic` 是独立
+path-dependency consumer。
 
 ## 当前目标与状态
 
-Phase 6A blocking offload v1 已完成本地实现、文档同步和验证；远程尚未更新。原生异步 I/O
-不属于 6A，下一项设计工作是 Phase 6B Spec。
+Phase 6A blocking offload v1 已作为本地提交 `701aa8b` 完成，尚未推送。Phase 6B TCP client
+v1 已进入实现：Plan 第 1、2 项完成，Asio backend gate 与 `IoContext` 生命周期通过完整 Dev
+验证；尚未实现 native-completion bridge 或 `TcpStream` 公共 API。
 
 ## 已完成工作
 
@@ -31,6 +34,27 @@ Phase 6A blocking offload v1 已完成本地实现、文档同步和验证；远
   CMP ThreadPool 和 `run_blocking()`；负载及成功/失败硬检查保持不变。
 - 三份 README、三份架构文档、Phase 6A Design/Plan 和 v1 readiness 数据报告已同步到实现
   事实。
+- 完成 Phase 6B 依赖核查：mcpp-index 当前提供 `chriskohlhoff.asio@1.38.1`，其 C++23 模块
+  `asio` 覆盖 Linux、macOS 和 Windows，能够复用 epoll、kqueue 与 IOCP 后端。
+- 新增并批准 Phase 6B TCP client v1 Design，确定首个原生异步 I/O 切片仅包含数值地址 TCP
+  客户端、`IoContext`、move-only `TcpStream`、`read_some()`、`write_all()` 和显式返回
+  Scheduler。
+- Spec 已明确 buffer/handle 生命周期、单读单写并发、EOF/partial transfer、错误映射、
+  stop/close/completion 竞态、exactly-once、context drain/join 及三平台确定性测试门槛。
+- 新增 Phase 6B Implementation Plan，将实现拆为 dependency/backend gate、`IoContext`
+  生命周期、单一 native-completion bridge、connect/read/write、取消/close/shutdown 竞态、
+  跨平台负载、readiness 客户端迁移、文档和完整验证十个顺序步骤。
+- 使用 mcpp 2026.8.11.2 精确加入 `[dependencies.chriskohlhoff] asio = "1.38.1"`。
+- 新增 `mcpplibs.cmp:tcp` 分区，私有导入 `std`、`asio`、`:cancellation` 和 `:task`；根模块
+  只重导出 `:tcp`，没有暴露 Asio 类型。
+- 实现不可复制、不可移动的公共 `IoContext`：共享私有状态拥有一个 `asio::io_context`、
+  persistent work guard、admission mutex/flag 和线性弱 socket registry；公开对象拥有一个
+  `std::jthread` driver。
+- `IoContext` shutdown 与普通 post 共用 admission 锁排序：先停止接纳，再在已接纳工作后关闭
+  live socket、释放 guard、自然排空 handler 并 join；不调用 `io_context::stop()`，driver
+  线程内自析构会终止而不是 self-join。
+- 新增 `tests/tcp_test.cpp`，以编译期断言锁定 `IoContext` 的默认构造及精确 copy/move traits，
+  并以运行测试验证构造、driver 启动、析构关闭和 join 不挂起。
 
 ## 重要决策
 
@@ -44,25 +68,50 @@ Phase 6A blocking offload v1 已完成本地实现、文档同步和验证；远
 - Phase 6A 仍是每个运行中同步调用占用一个系统线程的隔离方案，不宣称原生非阻塞 I/O。
 - 队列沿用 ThreadPool 的无界共享 FIFO；背压、超时、强制中断和 worker replacement 均未在
   没有实测需求前增加。
+- Phase 6B 先做 TCP 而非文件：现有 Asio package 的 socket 能统一覆盖三平台，file backend
+  不能提供同等平台面。
+- C++23 标准库没有网络 API，因此 6B 选择精确固定 `chriskohlhoff.asio@1.38.1`，私有导入，
+  不向 CMP 公共 API 暴露 Asio 类型；不自研三套 OS backend。
+- `IoContext` v1 固定一个私有 driver thread，不暴露通用 post/run/线程数接口；应用结果始终
+  经调用者指定 Scheduler 返回。
+- socket state 只弱引用 context；共享 context state 由公开 `IoContext` 与 driver 持有，
+  socket 不能延长公开 driver 生命周期。v1 registry 使用 O(n) 弱引用扫描，只有实测成本显著
+  时才替换。
+- `TcpStream` 允许一项 pending read 与一项 pending write；同方向重叠直接拒绝，不增加隐式
+  排队。主动 close、context shutdown 与已发起 write 的取消均有明确关闭语义。
+- v1 不含 DNS、server、TLS、UDP、文件 I/O、timeout、socket option 或隐式 executor；这些都
+  没有在首个可验证切片前预建。
+- 新测试只在 `tests/tcp_test.cpp` 内用同步 Asio loopback fixture；不为测试增加公共 server。
+- 现有三平台 CI 会自动发现新测试，不预先修改 workflow；`examples/basic` 保持短小且不引入
+  live network，仍作为外部 path consumer 回归运行。
+- readiness 只替换 TCP client；同步 loopback server 继续通过 Phase 6A `run_blocking()`
+  运行，compute/file workload 与硬计数保持不变。
 
 ## 修改 / 重要文件
 
-- 核心：`src/blocking.cppm`、`src/cmp.cppm`
-- 测试：`tests/blocking_test.cpp`
+- 当前实现：`mcpp.toml`、`src/tcp.cppm`、`src/cmp.cppm`
+- Phase 6A 核心：`src/blocking.cppm`
+- 测试：`tests/blocking_test.cpp`、`tests/tcp_test.cpp`
 - 示例：`examples/basic/src/main.cpp`
 - 压测：`benchmarks/v1-readiness/src/main.cpp`、
   `docs/benchmarks/2026-08-29-cmp-v1-readiness.md`
 - 方案：`docs/superpowers/specs/2026-08-29-cmp-phase6a-blocking-offload-v1-design.md`、
   `docs/superpowers/plans/2026-08-29-cmp-phase6a-blocking-offload-v1.md`
+- 已批准设计：
+  `docs/superpowers/specs/2026-08-29-cmp-phase6b-tcp-client-v1-design.md`
+- 当前实施计划：
+  `docs/superpowers/plans/2026-08-30-cmp-phase6b-tcp-client-v1.md`
 - 公共文档：`README.md`、`README.zh.md`、`README.zh.hant.md`、`docs/architecture.md`、
   `docs/architecture.zh.md`、`docs/architecture.zh.hant.md`
 
 ## 验证情况
 
-- `mcpp build --profile dev --strict --cache=off`：通过。
-- `mcpp test --profile dev --strict --cache=off`：9 个二进制、116/116 通过。
-- `mcpp build --profile release --strict --cache=off`：通过。
-- `mcpp test --profile release --strict --cache=off`：9 个二进制、116/116 通过。
+- Phase 6A baseline 的 `mcpp build --profile dev --strict --cache=off`：通过。
+- Phase 6A baseline 的 `mcpp test --profile dev --strict --cache=off`：9 个二进制、116/116
+  通过。
+- Phase 6A baseline 的 `mcpp build --profile release --strict --cache=off`：通过。
+- Phase 6A baseline 的 `mcpp test --profile release --strict --cache=off`：9 个二进制、
+  116/116 通过。
 - Dev 定向 `blocking_test`：11/11 通过。
 - Release `CancellationRaceInvokesAtMostOnce` 连续执行 100 轮：100/100 通过。
 - `examples/basic` 的 `mcpp run`：通过，包含 `Blocking result: 42`，退出码 0。
@@ -72,6 +121,14 @@ Phase 6A blocking offload v1 已完成本地实现、文档同步和验证；远
   吞吐已写入 benchmark 报告。
 - 当前 mcpp 仍输出 SubOS 缺少 `subos_info` 的既有环境提示，但所有构建和运行成功。
 - 以上均为本机 Linux/WSL2 结果；尚未执行 GitHub 三平台 CI 或其他远程操作。
+- Phase 6B backend gate：`mcpp build --profile dev --strict --cache=off` 通过；mcpp 下载并编译
+  `chriskohlhoff.asio` 1.38.1，CMP 使用 LLVM 22.1.8 构建成功。
+- Phase 6B `IoContext` focused gate：`mcpp test tcp_test --profile dev --strict --cache=off` 的
+  1/1 测试通过。
+- 加入 `IoContext` 后，`mcpp build --profile dev --strict --cache=off` 再次通过；
+  `mcpp test --profile dev --strict --cache=off` 为 10 个二进制、117/117 通过。
+- 本 checkpoint 未运行当前 Phase 6B 的 Release、example 或 benchmark；它们仍属于后续 Plan
+  gate，既有 Phase 6A Release/example/benchmark 结果不代表 TCP API 已实现。
 
 ## 已知问题 / 风险
 
@@ -82,14 +139,22 @@ Phase 6A blocking offload v1 已完成本地实现、文档同步和验证；远
 - 返回 Scheduler 的 owner 必须持续存活；RunLoop Scheduler 还必须处于 active `run()` 中。
 - `run_blocking()` 是线程隔离，不是 epoll、io_uring、kqueue 或 IOCP 等原生异步 I/O。
 - 三平台兼容性仍需远程 CI 确认。
+- `chriskohlhoff.asio@1.38.1` 只在本机 Linux/WSL2 + LLVM 22.1.8 完成模块编译；macOS 与
+  Windows 仍需后续远程 CI 验证。
+- Phase 6B 当前只有 backend 与 `IoContext` 生命周期；native-completion bridge、`TcpStream`
+  connect/read/write、取消竞态和 benchmark 迁移均尚未实现。
+- 单 I/O driver 是 v1 的刻意简化；只有 benchmark 证明它是瓶颈后才设计多 driver/strand。
 
 ## 剩余工作
 
-1. 用户审查 Phase 6A 本地改动；Commit、Push、PR 与 CI 均需分别获得明确授权。
-2. 用户确认进入下一设计阶段后，为一个窄资源族编写 Phase 6B 原生异步 I/O Spec；实现前仍需
-   单独批准。
+1. 按 Phase 6B Plan 第 3 项实现唯一的 native-completion bridge，锁定只有 Asio handler 能在
+   native initiation 后恢复私有协程，并准备统一的 error/count/cancellation state。
+2. 完成本地 Dev/Release、race、example 与五轮 readiness 验证后，再等待远程三平台 CI 所需
+   的单独授权。
+3. 当前 Phase 6B 代码、manifest、Design、Plan 与 HANDOFF 均未提交；是否创建本地提交、
+   Push、PR 或 CI 均需对应明确授权。
 
 ## 推荐下一步
 
-先审查并提交 Phase 6A；随后只设计 Phase 6B 的最小原生异步 I/O 边界，优先选择单一资源族，
-不把文件、网络和所有平台后端一次性绑定在同一阶段。
+按 `2026-08-30-cmp-phase6b-tcp-client-v1.md` 开始第 3 项，只实现私有 native-completion
+bridge 及其 exactly-once/cancellation 基础；connect 与 loopback fixture 留到第 4 项。

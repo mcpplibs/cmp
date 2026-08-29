@@ -15,12 +15,15 @@ have `std::stop_token` overloads for cooperative cancellation; timed scheduling 
 absolute `steady_clock` deadlines without a timer thread. `ThreadPool::Scheduler::schedule()`
 explicitly transfers a continuation to any fixed worker and has the same cancellation-winner rule.
 `run_blocking()` uses a caller-selected ThreadPool instance for synchronous work and publishes the
-outcome only after an explicit return Scheduler is reached.
+outcome only after an explicit return Scheduler is reached. Phase 6B adds an immovable `IoContext`
+with one private driver and a move-only `TcpStream` for native async numeric-address TCP clients;
+all public outcomes still pass through an explicit caller-selected Scheduler.
 
 The repository contains:
 
 - one mcpp package manifest;
-- the root module `mcpplibs.cmp` with Task, cancellation, executor, blocking, join, event, and mutex partitions;
+- the root module `mcpplibs.cmp` with Task, cancellation, executor, blocking, TCP, join, event, and
+  mutex partitions;
 - gtest contract, lifetime, exception, scheduling, and threading tests;
 - one standalone path-dependency example;
 - local v1-readiness and cross-platform ThreadPool benchmark consumers;
@@ -48,8 +51,10 @@ There is no `src/main.cpp`, so mcpp infers a library target named `cmp`; the man
 need a `[lib]` or `[targets.cmp]` override. The C++23 baseline is written explicitly even though
 it is also mcpp's default.
 
-`compat.gtest = "1.15.2"` is an explicitly namespaced development dependency used by the test
-targets. CMP does not track an `mcpp.lock` file; it is excluded by `.gitignore`.
+`chriskohlhoff.asio = "1.38.1"` is the exact runtime dependency privately used by the TCP partition;
+no Asio type appears in CMP's public API. `compat.gtest = "1.15.2"` is an explicitly namespaced
+development dependency used by the test targets. CMP does not track an `mcpp.lock` file; it is
+excluded by `.gitignore`.
 
 ## Repository layout
 
@@ -74,6 +79,7 @@ targets. CMP does not track an `mcpp.lock` file; it is excluded by `.gitignore`.
 │   ├── run_loop.cppm
 │   ├── thread_pool.cppm
 │   ├── blocking.cppm
+│   ├── tcp.cppm
 │   ├── when_all.cppm
 │   ├── task_group.cppm
 │   ├── one_shot_event.cppm
@@ -84,6 +90,7 @@ targets. CMP does not track an `mcpp.lock` file; it is excluded by `.gitignore`.
 │   ├── run_loop_test.cpp
 │   ├── thread_pool_test.cpp
 │   ├── blocking_test.cpp
+│   ├── tcp_test.cpp
 │   ├── when_all_test.cpp
 │   ├── task_group_test.cpp
 │   ├── one_shot_event_test.cpp
@@ -101,10 +108,10 @@ targets. CMP does not track an `mcpp.lock` file; it is excluded by `.gitignore`.
 ## Build and tests
 
 `.xlings.json` pins the mcpp version used by the project. `mcpp build` builds the inferred library
-target. `mcpp test` discovers nine test files and links a gtest entry point for each. The 116 tests
+target. `mcpp test` discovers ten test files and links a gtest entry point for each. The 140 tests
 verify Task ownership and symmetric transfer together with structured joins, root execution,
 scheduling, exception propagation, timed and cross-thread wake-up, cancellation races, invalid
-scheduler use, loop reuse, and stack-safe repeated completion.
+scheduler use, loop reuse, stack-safe repeated completion, and TCP lifecycle/load behavior.
 
 Each CI workflow installs the project tools, builds the library, runs the test suite, and runs
 `examples/basic`. The workflows are separate because tool installation and runner details differ
@@ -435,11 +442,26 @@ thread on which the coroutine currently executes.
 - the return schedule is intentionally uncancellable so every outcome reaches one executor;
 - this is thread-based isolation and does not claim native non-blocking I/O.
 
+`IoContext` and `TcpStream` have the following contract:
+
+- one immovable context owns one private I/O driver and may be shared by many streams;
+- a move-only stream connects only to numeric IPv4/IPv6 text; DNS and listening APIs are absent;
+- `connect()`, `read_some()`, and `write_all()` are lazy Tasks and publish success or failure only
+  after the explicit return Scheduler hop;
+- read/write spans borrow their storage until the Task completes; a stream permits one pending read
+  and one pending write, while same-direction overlap throws `std::logic_error`;
+- remote EOF is sticky for reads but leaves the write direction open; `write_all()` is all-or-error;
+- pre-cancellation initiates no I/O and leaves an open stream usable; cancelling an initiated write
+  closes the stream;
+- `close()` is thread-safe, idempotent, and non-blocking; close and context shutdown cancel accepted
+  operations exactly once when they win the completion race;
+- Phase 6A isolates arbitrary synchronous work on threads, while Phase 6B is native async TCP only.
+
 There is no public free-standing `sync_wait`, detached execution, standalone Timer handle,
-asynchronous I/O backend, custom frame allocator, or distinct blocking-pool type. Cancellation remains
-explicit: Scheduler waits and `AsyncManualResetEvent` accept tokens, and TaskGroup owns an optional
-shared stop channel, but the module provides no implicit propagation and no compatibility alias for
-the old scaffold module.
+generic asynchronous-I/O hierarchy, custom frame allocator, or distinct blocking-pool type.
+Cancellation remains explicit: Scheduler/event/TCP waits accept tokens, and TaskGroup owns an
+optional shared stop channel, but the module provides no implicit propagation and no compatibility
+alias for the old scaffold module.
 
 Capturing coroutine lambdas require particular care: invoking a temporary capturing lambda can
 leave the lazy coroutine referring to a destroyed closure. CMP does not yet provide a helper that
@@ -457,10 +479,10 @@ package contract:
 1. TaskGroup result handles and additional cancellation-aware primitives;
 2. channels and additional structured wake-up paths;
 3. profile-guided work stealing if representative workloads justify it;
-4. asynchronous I/O integrations;
+4. additional native I/O families such as DNS, listeners, TLS, or files;
 5. result adapters and optional coroutine-frame allocation strategies.
 
-Task, cancellation, RunLoop, ThreadPool, blocking offload, `when_all`, TaskGroup, OneShotEvent,
+Task, cancellation, RunLoop, ThreadPool, blocking offload, TCP, `when_all`, TaskGroup, OneShotEvent,
 AsyncManualResetEvent, and AsyncMutex occupy separate module partitions because they are
 implemented public boundaries.
 Further partitions or implementation units are added only when another implemented API needs them.
@@ -478,14 +500,15 @@ cd examples/basic
 mcpp run
 ```
 
-The expected result is a successful library build, 116 passing tests across nine binaries, and an
+The expected result is a successful library build, 140 passing tests across ten binaries, and an
 example that prints `Coroutine result: 42`, `Concurrent result: 42`, `Worker pool result: 42`,
 `Blocking result: 42`, `Task group result: 42`, `Recursive group result: 3`, `Event signalled`,
 `Reusable event cycles: 2`, `Mutex result: 42`, then
 `Coroutine cancelled` and exits with status 0. Tests retain the existing high-volume stack checks
 and add 20,000 recursive TaskGroup admissions, 100,000 pre-cancelled ready schedules, 50,000 manual
 event waiters, 20,000 nested reusable-event signals, set/cancel races, queued blocking cancellation,
-and 5,000 concurrent blocking offloads. Focused race suites pass repeated Release runs. Compute,
+5,000 concurrent blocking offloads, a 32-client TCP load, and repeated TCP close/stop completion
+races. Focused race suites pass repeated Release runs. Compute,
 temporary-file, and loopback-network counts and
 throughput are recorded in the
 [v1 readiness benchmark](benchmarks/2026-08-29-cmp-v1-readiness.md). ThreadPool counts, concurrency,

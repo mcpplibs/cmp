@@ -21,17 +21,19 @@
 > CMP provides a lazy, single-consumer `Task<T>` / `Task<void>`, structured variadic and vector
 > `when_all()`, an eager structured `TaskGroup`, one-shot and reusable events, an RAII `AsyncMutex`,
 > a caller-thread `RunLoop` with explicit and monotonic timed scheduling, and a fixed-size CPU
-> `ThreadPool`. `run_blocking()` executes an owned synchronous callable on a dedicated pool instance
+> `ThreadPool`. Phase 6B adds an explicit `IoContext` and move-only `TcpStream` for native async
+> numeric-address TCP clients. `run_blocking()` executes an owned synchronous callable on a
+> dedicated pool instance
 > and delivers its outcome through an explicit return Scheduler. Ready scheduling on either
 > executor, timed waits, reusable-event waits, TaskGroup children, and queued blocking offloads can
-> use explicit cooperative cancellation with `std::stop_token`; native asynchronous I/O and
-> detached execution are not implemented.
+> use explicit cooperative cancellation with `std::stop_token`; TCP operations use the same token
+> model. Detached execution and other native I/O families are not implemented.
 
 CMP is being built as a modern coroutine runtime and library on standard stackless C++
 coroutines. Its explicit `co_await` model now covers fixed and incremental structured concurrency,
 one-time event notification, caller-thread and multi-worker scheduling, monotonic timers, and
-cancellable waits, plus structured isolation of blocking work. Native asynchronous I/O remains a
-separate, incremental design step.
+cancellable waits, structured isolation of blocking work, and one portable native async TCP client
+slice.
 
 ## Why CMP?
 
@@ -56,11 +58,12 @@ promise that:
 - a task is automatically equivalent to a Go goroutine;
 - an arbitrary blocking call becomes non-blocking;
 - coroutine switching is safe directly inside a signal handler;
-- task migration is implicit, work stealing is already enabled, or arbitrary async I/O exists.
+- task migration is implicit, work stealing is already enabled, or every I/O family is async.
 
 Those capabilities must be designed and verified individually. CMP now uses an explicitly
-dedicated `ThreadPool` instance with `run_blocking()` for synchronous work; native async I/O awaiters
-and cooperative safe points remain separate work.
+dedicated `ThreadPool` instance with `run_blocking()` for synchronous work. Phase 6B provides native
+async TCP clients; DNS, listening sockets, TLS, file I/O, and cooperative safe points remain
+separate work.
 
 ## Quick Start
 
@@ -99,6 +102,8 @@ using mcpplibs::cmp::OperationCancelled;
 using mcpplibs::cmp::OneShotEvent;
 using mcpplibs::cmp::TaskGroup;
 using mcpplibs::cmp::ThreadPool;
+using mcpplibs::cmp::IoContext;
+using mcpplibs::cmp::TcpStream;
 using mcpplibs::cmp::run_blocking;
 using mcpplibs::cmp::when_all;
 
@@ -322,6 +327,34 @@ request can skip work that has not been claimed; it cannot preempt a running syn
 the return schedule is intentionally not cancellable. This is thread-based isolation, not native
 non-blocking I/O.
 
+The native TCP surface stays explicit and small:
+
+```cpp
+Task<std::size_t> exchange(
+    IoContext& io,
+    RunLoop::Scheduler caller,
+    std::string_view numericAddress,
+    std::uint16_t port,
+    std::span<const std::byte> request,
+    std::span<std::byte> reply,
+    std::stop_token token = {}) {
+    auto stream = co_await TcpStream::connect(
+        io, caller, numericAddress, port, token);
+    co_await stream.write_all(caller, request, token);
+    co_return co_await stream.read_some(caller, reply, token);
+}
+```
+
+Share one immovable `IoContext` across streams; it owns one private I/O driver. `TcpStream` is
+move-only, and connect accepts numeric IPv4/IPv6 text only—no blocking DNS is hidden inside it.
+Read/write spans borrow their storage until the returned Task completes. Every success or error
+attempts the explicit return-Scheduler hop. One read and one write may coexist; another operation
+in the same direction throws `std::logic_error`. Pre-cancellation leaves an open stream usable,
+while cancellation after `write_all()` starts closes it. `close()` is thread-safe, idempotent, and
+causes accepted operations to complete once with `OperationCancelled` when close wins. Phase 6A
+isolates arbitrary synchronous calls on ThreadPool workers; Phase 6B is native async TCP, not a
+generic async-I/O layer.
+
 RunLoop is not a background thread and does not make blocking code asynchronous. A Task that
 suspends without arranging a future resume can leave `run()` waiting indefinitely. CMP does not
 provide automatic thread affinity: after an external awaiter resumes on another thread, explicitly
@@ -332,13 +365,14 @@ await the desired Scheduler to return to its RunLoop.
 ```text
 .
 ├── .xlings.json              # pinned project tool environment
-├── mcpp.toml                 # package identity and test dependency
+├── mcpp.toml                 # package identity, runtime, and test dependencies
 ├── src/cmp.cppm              # root module interface
 ├── src/task.cppm             # Task module partition
 ├── src/cancellation.cppm     # shared cooperative-cancellation exception
 ├── src/run_loop.cppm         # RunLoop and Scheduler partition
 ├── src/thread_pool.cppm      # fixed-size CPU worker scheduler
 ├── src/blocking.cppm         # structured blocking-call offload
+├── src/tcp.cppm              # native async TCP client and I/O context
 ├── src/when_all.cppm         # structured concurrent Task join
 ├── src/task_group.cppm       # eager mutable structured Task scope
 ├── src/one_shot_event.cppm   # allocation-free one-time notification
@@ -348,6 +382,7 @@ await the desired Scheduler to return to its RunLoop.
 ├── tests/run_loop_test.cpp   # scheduler, boundary, and threading tests
 ├── tests/thread_pool_test.cpp # worker, cancellation, and shutdown tests
 ├── tests/blocking_test.cpp   # blocking offload, affinity, and cancellation tests
+├── tests/tcp_test.cpp        # TCP lifecycle, cancellation, races, and load tests
 ├── tests/when_all_test.cpp   # join ownership, result, and race tests
 ├── tests/task_group_test.cpp # mutable scope lifetime and race tests
 ├── tests/one_shot_event_test.cpp # event publication and race tests
@@ -381,7 +416,7 @@ global mcpp installation.
 
 CMP does not track `mcpp.lock`; `.gitignore` enforces that repository policy. Runtime dependencies
 belong in `[dependencies]`; gtest is declared explicitly under `[dev-dependencies.compat]`.
-The current local suite contains 116 tests across nine binaries. The POSIX-only Release pressure
+The current local suite contains 140 tests across ten binaries. The POSIX-only Release pressure
 consumer and its recorded success/failure data are documented in the
 [v1 readiness benchmark](docs/benchmarks/2026-08-29-cmp-v1-readiness.md).
 Multi-worker correctness and performance data are documented in the
@@ -398,7 +433,8 @@ Runtime work is split into independently reviewable phases:
    OneShotEvent, AsyncManualResetEvent, and AsyncMutex — implemented and pressure-tested;
 5. fixed-size multi-worker scheduling — implemented and benchmarked; work stealing remains gated
    by profiling evidence;
-6. structured blocking offload — implemented; native asynchronous I/O remains separately gated.
+6. structured blocking offload — implemented; native async numeric-address TCP client — locally
+   implemented and verified, with remote three-platform CI still pending.
 
 The remaining order is directional, not a promise that a listed feature is already implemented.
 

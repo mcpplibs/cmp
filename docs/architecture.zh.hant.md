@@ -14,12 +14,14 @@ CMP 是一個具備小型協程執行核心的 C++23 模組專案。根模組匯
 `std::stop_token` 的協作式取消多載；定時排程使用相對和絕對的 `steady_clock` 期限，且不建立
 計時執行緒。`ThreadPool::Scheduler::schedule()` 會把 continuation 明確轉移到任意固定
 worker，並採用相同的取消獲勝規則。`run_blocking()` 使用呼叫端選擇的 ThreadPool 實例執行
-同步工作，並只在到達明確返回 Scheduler 後發布結果。
+同步工作，並只在到達明確返回 Scheduler 後發布結果。Phase 6B 新增擁有一個私有 driver 的
+不可移動 `IoContext`，以及用於原生非同步數值位址 TCP client 的 move-only `TcpStream`；所有
+公開結果仍透過呼叫端明確選擇的 Scheduler 返回。
 
 儲存庫現有內容包括：
 
 - 一份 mcpp 套件清單；
-- 根模組 `mcpplibs.cmp` 及 Task、cancellation、執行器、blocking、join、event、mutex 模組分割區；
+- 根模組 `mcpplibs.cmp` 及 Task、cancellation、執行器、blocking、TCP、join、event、mutex 模組分割區；
 - 涵蓋契約、生命週期、例外、排程和執行緒行為的 gtest 測試；
 - 一個透過路徑相依使用根套件的獨立範例；
 - v1 可開發性壓測和跨平台 ThreadPool 壓測 consumer；
@@ -45,7 +47,8 @@ mcpp 套件由 `mcpplibs` 和 `cmp` 共同識別。使用端在 `[dependencies.m
 `src/main.cpp`，因此 mcpp 會推斷出名為 `cmp` 的函式庫目標，不需要額外設定 `[lib]` 或
 `[targets.cmp]`。雖然 C++23 也是 mcpp 的預設標準，清單中仍明確寫出這項基線。
 
-`compat.gtest = "1.15.2"` 是測試使用的明確命名空間開發相依。CMP 目前不追蹤
+`chriskohlhoff.asio = "1.38.1"` 是 TCP 分割區私下使用的精確執行期相依；CMP 公開 API 不暴露
+Asio 型別。`compat.gtest = "1.15.2"` 是測試使用的明確命名空間開發相依。CMP 目前不追蹤
 `mcpp.lock`，該檔案由 `.gitignore` 排除。
 
 ## 儲存庫結構
@@ -71,6 +74,7 @@ mcpp 套件由 `mcpplibs` 和 `cmp` 共同識別。使用端在 `[dependencies.m
 │   ├── run_loop.cppm
 │   ├── thread_pool.cppm
 │   ├── blocking.cppm
+│   ├── tcp.cppm
 │   ├── when_all.cppm
 │   ├── task_group.cppm
 │   ├── one_shot_event.cppm
@@ -81,6 +85,7 @@ mcpp 套件由 `mcpplibs` 和 `cmp` 共同識別。使用端在 `[dependencies.m
 │   ├── run_loop_test.cpp
 │   ├── thread_pool_test.cpp
 │   ├── blocking_test.cpp
+│   ├── tcp_test.cpp
 │   ├── when_all_test.cpp
 │   ├── task_group_test.cpp
 │   ├── one_shot_event_test.cpp
@@ -98,9 +103,9 @@ mcpp 套件由 `mcpplibs` 和 `cmp` 共同識別。使用端在 `[dependencies.m
 ## 建置與測試
 
 `.xlings.json` 固定專案使用的 mcpp 版本。`mcpp build` 建置自動推斷的函式庫目標。
-`mcpp test` 會找到九個測試檔案，並為每個檔案連結 gtest 進入點。116 項測試同時驗證 Task 所有權
+`mcpp test` 會找到十個測試檔案，並為每個檔案連結 gtest 進入點。140 項測試同時驗證 Task 所有權
 和對稱轉移、結構化匯合，以及根任務執行、普通與定時排程、例外傳播、跨執行緒期限喚醒、
-無效 Scheduler、取消競態、RunLoop 重複使用和不會增長呼叫堆疊的重複完成。
+無效 Scheduler、取消競態、RunLoop 重複使用、不會增長呼叫堆疊的重複完成，以及 TCP 生命週期和負載。
 
 三套 CI 工作流程都會安裝專案工具、建置函式庫、執行測試並執行 `examples/basic`。不同
 作業系統的工具安裝和執行環境不同，因此分別保留工作流程檔案。
@@ -414,10 +419,24 @@ Task；明確等待原 Scheduler 才會把 continuation 送回對應 RunLoop。�
 - 返回排程刻意不可取消，使每個結果都到達一個執行器；
 - 這是基於執行緒的隔離，不表示原生非阻塞 I/O。
 
-目前沒有公開自由函式 `sync_wait`、detached 執行、獨立 Timer 控制代碼、非同步 I/O 後端、
-自訂協程框架 allocator 或獨立的阻塞執行緒池型別。取消仍是明確的：Scheduler 等待和
-`AsyncManualResetEvent` 接受 token，TaskGroup 可持有共享 stop 通道，但模組不提供隱式
-傳播，並且沒有保留舊骨架模組的相容別名。
+`IoContext` 與 `TcpStream` 遵循以下契約：
+
+- 一個不可移動的 context 擁有一個私有 I/O driver，並可由多個 stream 共用；
+- move-only stream 只連線數值 IPv4/IPv6 文字；不提供 DNS 或監聽 API；
+- `connect()`、`read_some()` 和 `write_all()` 都是延遲 Task，成功或失敗只在明確返回 Scheduler
+  跳轉後發布；
+- read/write span 借用底層儲存直到 Task 完成；一個 stream 允許一個 pending read 和一個
+  pending write，同方向重疊拋出 `std::logic_error`；
+- 遠端 EOF 對 read 保持 sticky，但不關閉 write 方向；`write_all()` 採用全寫或錯誤契約；
+- 預取消不發起 I/O，並保持 open stream 可用；已發起 write 被取消會關閉 stream；
+- `close()` 執行緒安全、冪等且非阻塞；當 close 或 context shutdown 贏得競態時，已接納操作
+  恰好取消一次；
+- Phase 6A 在執行緒上隔離任意同步工作，Phase 6B 只提供原生非同步 TCP。
+
+目前沒有公開自由函式 `sync_wait`、detached 執行、獨立 Timer 控制代碼、通用非同步 I/O 層、
+自訂協程框架 allocator 或獨立的阻塞執行緒池型別。取消仍是明確的：Scheduler、event 和 TCP
+等待接受 token，TaskGroup 可持有共享 stop 通道，但模組不提供隱式傳播，也沒有保留舊骨架
+模組的相容別名。
 
 捕捉變數的協程 lambda 需要特別小心：立即呼叫一個暫時的捕捉 lambda，可能使延遲協程參考
 已經銷毀的閉包。CMP 尚未提供延長該閉包生命週期的輔助函式。
@@ -433,11 +452,11 @@ CMP 名稱中的 `C` 與 Go 執行期中的 `G` 相呼應，但這只說明命�
 1. TaskGroup 結果控制代碼及更多支援取消的原語；
 2. channel 和更多結構化喚醒路徑；
 3. 代表性負載證明有必要時再加入 profiling 驅動的工作竊取；
-4. 非同步 I/O 整合；
+4. DNS、監聽、TLS 或檔案等其他原生 I/O 類型；
 5. 結果適配器和可選的協程框架配置策略。
 
-Task、cancellation、RunLoop、ThreadPool、blocking offload、`when_all`、TaskGroup、OneShotEvent、
-AsyncManualResetEvent 與 AsyncMutex 已形成真實的公開邊界，因此分別位於模組分割區中。
+Task、cancellation、RunLoop、ThreadPool、blocking offload、TCP、`when_all`、TaskGroup、
+OneShotEvent、AsyncManualResetEvent 與 AsyncMutex 已形成真實的公開邊界，因此分別位於模組分割區中。
 只有其他已實作 API 確實需要新邊界時，才繼續增加模組分割區或實作單元。
 
 ## 驗證
@@ -453,14 +472,15 @@ cd examples/basic
 mcpp run
 ```
 
-預期結果是函式庫建置成功、九個二進位檔中的 116 項測試全部通過，而且範例依序輸出
+預期結果是函式庫建置成功、十個二進位檔中的 140 項測試全部通過，而且範例依序輸出
 `Coroutine result: 42`、`Concurrent result: 42`、`Worker pool result: 42`、
 `Blocking result: 42`、`Task group result: 42`、`Recursive group result: 3`、`Event signalled`、
 `Reusable event cycles: 2`、
 `Mutex result: 42` 和 `Coroutine cancelled` 後以狀態 0 結束。測試保留原有高容量堆疊安全
 檢查，並增加兩萬次 TaskGroup 遞迴接納、十萬次預取消就緒排程、五萬個 manual event 等待者、
-兩萬次巢狀可複用事件訊號、set/cancel 競態、排隊阻塞取消和 5,000 個並行阻塞 offload；重點
-競態套件已連續執行多輪 Release 測試。計算、臨時檔案和回環網路的成功/失敗計數及吞吐記錄在
+兩萬次巢狀可複用事件訊號、set/cancel 競態、排隊阻塞取消、5,000 個並行阻塞 offload、
+32 客戶端 TCP 負載，以及重複的 TCP close/stop completion 競態；重點競態套件已連續執行多輪
+Release 測試。計算、臨時檔案和回環網路的成功/失敗計數及吞吐記錄在
 [v1 可開發性壓測](benchmarks/2026-08-29-cmp-v1-readiness.md)。ThreadPool 的計數、並行和五輪
 Release 資料記錄在[執行緒池壓測](benchmarks/2026-08-29-cmp-thread-pool.md)。目前 Windows LLVM 工具鏈
 不會產生 GNU depfile；如果模組介面包含的檔案發生變更，增量建置可能沿用舊的 BMI 或

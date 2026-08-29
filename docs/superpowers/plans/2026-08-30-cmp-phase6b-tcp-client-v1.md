@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-30
 **Design:** `docs/superpowers/specs/2026-08-29-cmp-phase6b-tcp-client-v1-design.md`
-**Status:** In progress — readiness TCP client migration complete
+**Status:** In progress — developer documentation synchronized
 **Baseline:** Local Phase 6A commit `701aa8b`, 116/116 Dev and Release tests
 
 ## Execution Rule
@@ -399,6 +399,23 @@ Do not add a live-network call or a platform-specific loopback server to `exampl
 portable test fixture and readiness benchmark already exercise the API, while the basic example
 should stay short and deterministic. Still run the unchanged example to verify that adding the
 runtime dependency does not break an external path consumer.
+
+**Self-review — 2026-08-30:** Keep one semantic checklist across all six documents rather than
+copying implementation internals: `IoContext` owns one driver and is shared; `TcpStream` is
+move-only; connect accepts numeric IPv4/IPv6 only; spans borrow storage through Task completion;
+every outcome attempts the explicit return Scheduler; one read and one write may coexist while
+same-direction overlap fails; pre-cancellation leaves an open stream usable, initiated write
+cancellation closes it, and close/context shutdown cancel accepted work exactly once. State that
+Phase 6A isolates arbitrary synchronous work on threads while Phase 6B is native async TCP only,
+not generic async I/O. Update module/test trees, the exact local 10-binary/140-test counts, and the
+readiness result. Add a short documentation-only TCP snippet, but leave `examples/basic` unchanged.
+English, Simplified Chinese, and Traditional Chinese must remain structurally equivalent.
+
+**Completion — 2026-08-30:** Synchronized all three README and architecture variants with the
+verified `IoContext`/`TcpStream` surface, lifecycle and concurrency contracts, Phase 6A/6B
+boundary, module/test layout, 140-test total, and readiness result. Removed stale statements that
+native async I/O was wholly absent. Kept `examples/basic` unchanged; its path-consumer `mcpp run`
+completed successfully with the expected output and exit status 0.
 
 ## 10. Full verification and state record
 

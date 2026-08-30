@@ -95,12 +95,12 @@ Release、mcpp-index PR 和 index 合并仍必须按各自远程门禁单独授�
 
 ## 剩余工作
 
-1. 推送本次 CI 证据状态同步，并确认 PR #12 最新 HEAD 的三平台检查仍全部通过。
-2. PR 描述仍写着三平台统一 `--strict`；按 Git 安全规则，修正 PR 描述需要用户另行授权。
-3. 获得单独授权后合并 PR，同步干净 `main`，无 `--allow-dirty` 重新生成并验证正式归档。
-4. tag、GitHub Release、mcpp-index PR、index 合并和最终独立 consumer 验证按 Design 的
+1. PR 描述仍写着三平台统一 `--strict`；按 Git 安全规则，修正 PR 描述需要用户另行授权。
+2. 合并前复核 PR #12 最新 HEAD 的三平台检查；获得单独授权后合并，同步干净 `main`，
+   无 `--allow-dirty` 重新生成并验证正式归档。
+3. tag、GitHub Release、mcpp-index PR、index 合并和最终独立 consumer 验证按 Design 的
    独立授权门禁逐项执行。
 
 ## 推荐下一步
 
-推送 CI 证据状态同步并复核最新检查；不自行修改 PR 描述或合并 PR。
+停在 PR #12 描述修改门禁；不自行修改或合并 PR。

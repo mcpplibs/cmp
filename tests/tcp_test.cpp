@@ -11,6 +11,7 @@ using mcpplibs::cmp::OperationCancelled;
 using mcpplibs::cmp::RunLoop;
 using mcpplibs::cmp::Task;
 using mcpplibs::cmp::TaskGroup;
+using mcpplibs::cmp::TcpListener;
 using mcpplibs::cmp::TcpStream;
 using mcpplibs::cmp::ThreadPool;
 
@@ -34,6 +35,18 @@ static_assert(!std::is_copy_assignable_v<TcpStream>);
 static_assert(!std::is_move_assignable_v<TcpStream>);
 static_assert(noexcept(std::declval<TcpStream&>().close()));
 static_assert(noexcept(std::declval<const TcpStream&>().is_open()));
+
+static_assert(!std::default_initializable<TcpListener>);
+static_assert(std::destructible<TcpListener>);
+static_assert(std::is_final_v<TcpListener>);
+static_assert(!std::copy_constructible<TcpListener>);
+static_assert(std::move_constructible<TcpListener>);
+static_assert(std::is_nothrow_move_constructible_v<TcpListener>);
+static_assert(!std::is_copy_assignable_v<TcpListener>);
+static_assert(!std::is_move_assignable_v<TcpListener>);
+static_assert(noexcept(std::declval<TcpListener&>().close()));
+static_assert(noexcept(std::declval<const TcpListener&>().is_open()));
+static_assert(noexcept(std::declval<const TcpListener&>().local_port()));
 
 class LoopbackServer final {
 public:
@@ -411,6 +424,29 @@ Task<void> occupy_worker(
     release.wait(false, std::memory_order_acquire);
 }
 
+template<typename Resource>
+void close_concurrently(Resource& resource) {
+    constexpr std::size_t CLOSER_COUNT { 4 };
+    std::barrier start { CLOSER_COUNT + 1 };
+    std::vector<std::jthread> closers {};
+    closers.reserve(CLOSER_COUNT);
+
+    for (std::size_t index {}; index < CLOSER_COUNT; ++index) {
+        closers.emplace_back([&resource, &start] {
+            start.arrive_and_wait();
+            resource.close();
+        });
+    }
+
+    start.arrive_and_wait();
+
+    for (auto& closer : closers) {
+        closer.join();
+    }
+
+    resource.close();
+}
+
 struct WriteOverlapObservation final {
     bool workerEntered_ {};
     bool rejected_ {};
@@ -592,8 +628,7 @@ Task<CloseReadObservation> close_pending_read(
     } catch (...) {
     }
 
-    stream.close();
-    stream.close();
+    close_concurrently(stream);
     co_await group.join();
     co_return result;
 }
@@ -836,6 +871,1327 @@ Task<LoadCounts> run_concurrent_echo_clients(
     }
 
     co_return counts;
+}
+
+enum class BindOutcome {
+    succeeded,
+    cancelled,
+    system_error
+};
+
+struct BindObservation final {
+    BindOutcome outcome_ {};
+    std::thread::id resumedThread_ {};
+};
+
+template<typename ReturnScheduler>
+Task<std::thread::id> bind_and_observe(
+    IoContext& context,
+    ReturnScheduler returnTo,
+    std::string_view address,
+    std::uint16_t port) {
+    auto listener = co_await TcpListener::bind(
+        context,
+        std::move(returnTo),
+        address,
+        port);
+    co_return std::this_thread::get_id();
+}
+
+template<typename ReturnScheduler>
+Task<BindObservation> observe_bind_outcome(
+    IoContext& context,
+    ReturnScheduler returnTo,
+    std::string_view address,
+    std::uint16_t port,
+    std::stop_token stopToken = {}) {
+    try {
+        auto listener = co_await TcpListener::bind(
+            context,
+            std::move(returnTo),
+            address,
+            port,
+            std::move(stopToken));
+        co_return BindObservation {
+            BindOutcome::succeeded,
+            std::this_thread::get_id()
+        };
+    } catch (const OperationCancelled&) {
+        co_return BindObservation {
+            BindOutcome::cancelled,
+            std::this_thread::get_id()
+        };
+    } catch (const std::system_error&) {
+        co_return BindObservation {
+            BindOutcome::system_error,
+            std::this_thread::get_id()
+        };
+    }
+}
+
+struct AcceptObservation final {
+    int completions_ {};
+    bool succeeded_ {};
+    bool cancelled_ {};
+    bool logicError_ {};
+    bool systemError_ {};
+    bool unexpected_ {};
+    std::thread::id resumedThread_ {};
+};
+
+template<typename ReturnScheduler>
+Task<void> observe_accept(
+    TcpListener& listener,
+    ReturnScheduler returnTo,
+    AcceptObservation& observation,
+    std::stop_token stopToken = {}) {
+    try {
+        auto stream = co_await listener.accept(
+            std::move(returnTo),
+            std::move(stopToken));
+        observation.succeeded_ = true;
+    } catch (const OperationCancelled&) {
+        observation.cancelled_ = true;
+    } catch (const std::logic_error&) {
+        observation.logicError_ = true;
+    } catch (const std::system_error&) {
+        observation.systemError_ = true;
+    } catch (...) {
+        observation.unexpected_ = true;
+    }
+
+    ++observation.completions_;
+    observation.resumedThread_ = std::this_thread::get_id();
+}
+
+struct ListenerServerObservation final {
+    int completions_ {};
+    bool succeeded_ {};
+    bool cancelled_ {};
+    bool error_ {};
+    std::thread::id resumedThread_ {};
+};
+
+Task<void> accept_and_echo(
+    TcpListener& listener,
+    RunLoop::Scheduler returnTo,
+    bool closeListenerAfterAccept,
+    ListenerServerObservation& observation) {
+    try {
+        auto stream = co_await listener.accept(returnTo);
+
+        if (closeListenerAfterAccept) {
+            listener.close();
+        }
+
+        std::array<std::byte, 4> payload {};
+        std::size_t received {};
+
+        while (received < payload.size()) {
+            const auto size = co_await stream.read_some(
+                returnTo,
+                std::span { payload }.subspan(received));
+
+            if (size == 0) {
+                throw std::runtime_error { "listener client closed early" };
+            }
+
+            received += size;
+        }
+
+        co_await stream.write_all(returnTo, payload);
+        observation.succeeded_ = true;
+    } catch (const OperationCancelled&) {
+        observation.cancelled_ = true;
+    } catch (...) {
+        observation.error_ = true;
+    }
+
+    ++observation.completions_;
+    observation.resumedThread_ = std::this_thread::get_id();
+}
+
+struct ListenerExchangeObservation final {
+    ListenerServerObservation server_ {};
+    LoadClientObservation client_ {};
+};
+
+Task<ListenerExchangeObservation> run_listener_exchange(
+    IoContext& context,
+    TcpListener& listener,
+    RunLoop::Scheduler returnTo,
+    bool closeListenerAfterAccept = false) {
+    ListenerExchangeObservation observation {};
+    TaskGroup group {};
+    group.spawn(accept_and_echo(
+        listener,
+        returnTo,
+        closeListenerAfterAccept,
+        observation.server_));
+    group.spawn(run_echo_client(
+        context,
+        returnTo,
+        listener.local_port(),
+        7,
+        observation.client_));
+    co_await group.join();
+    co_return observation;
+}
+
+Task<void> connect_once_to(
+    IoContext& context,
+    RunLoop::Scheduler returnTo,
+    std::string_view numericAddress,
+    std::uint16_t port,
+    bool& succeeded) {
+    try {
+        auto stream = co_await TcpStream::connect(
+            context,
+            std::move(returnTo),
+            numericAddress,
+            port);
+        succeeded = true;
+    } catch (...) {
+        succeeded = false;
+    }
+}
+
+struct AcceptConnectionObservation final {
+    AcceptObservation accepted_ {};
+    bool connected_ {};
+};
+
+Task<AcceptConnectionObservation> run_accept_connection(
+    IoContext& context,
+    TcpListener& listener,
+    RunLoop::Scheduler returnTo,
+    std::string_view numericAddress) {
+    AcceptConnectionObservation result {};
+    TaskGroup group {};
+    group.spawn(observe_accept(
+        listener,
+        returnTo,
+        result.accepted_));
+    group.spawn(connect_once_to(
+        context,
+        returnTo,
+        numericAddress,
+        listener.local_port(),
+        result.connected_));
+    co_await group.join();
+    co_return result;
+}
+
+template<typename AcceptScheduler>
+Task<AcceptConnectionObservation> run_accept_connection_with_return(
+    IoContext& context,
+    TcpListener& listener,
+    AcceptScheduler acceptReturnTo,
+    RunLoop::Scheduler clientReturnTo) {
+    AcceptConnectionObservation result {};
+    TaskGroup group {};
+    group.spawn(observe_accept(
+        listener,
+        std::move(acceptReturnTo),
+        result.accepted_));
+    group.spawn(connect_once_to(
+        context,
+        std::move(clientReturnTo),
+        "127.0.0.1",
+        listener.local_port(),
+        result.connected_));
+    co_await group.join();
+    co_return result;
+}
+
+struct SignallingScheduler final {
+    ThreadPool::Scheduler scheduler_;
+    std::binary_semaphore* entered_ {};
+
+    [[nodiscard]] Task<void> schedule() const {
+        entered_->release();
+        co_await scheduler_.schedule();
+    }
+};
+
+template<typename T>
+Task<void> store_task_result(Task<T> task, T& result) {
+    result = co_await std::move(task);
+}
+
+struct BindPublicationObservation final {
+    bool workerEntered_ {};
+    bool returnEntered_ {};
+    BindObservation bind_ {};
+};
+
+Task<BindPublicationObservation> destroy_context_before_bind_publication(
+    std::unique_ptr<IoContext>& context,
+    ThreadPool::Scheduler gatedReturn) {
+    BindPublicationObservation result {};
+    std::binary_semaphore workerEntered { 0 };
+    std::binary_semaphore returnEntered { 0 };
+    std::atomic<bool> releaseWorker { false };
+    TaskGroup group {};
+    group.spawn(occupy_worker(
+        gatedReturn,
+        workerEntered,
+        releaseWorker));
+    result.workerEntered_ = workerEntered.try_acquire_for(2s);
+
+    if (result.workerEntered_) {
+        group.spawn(store_task_result(
+            observe_bind_outcome(
+                *context,
+                SignallingScheduler { gatedReturn, &returnEntered },
+                "127.0.0.1",
+                0),
+            result.bind_));
+        result.returnEntered_ = returnEntered.try_acquire_for(2s);
+        context.reset();
+    }
+
+    releaseWorker.store(true, std::memory_order_release);
+    releaseWorker.notify_all();
+    co_await group.join();
+    co_return result;
+}
+
+struct TcpPublicationObservation final {
+    bool workerEntered_ {};
+    bool returnEntered_ {};
+    ConnectObservation connect_ {};
+    AcceptObservation accept_ {};
+};
+
+Task<TcpPublicationObservation> destroy_context_before_tcp_publication(
+    std::unique_ptr<IoContext>& context,
+    TcpListener& listener,
+    RunLoop::Scheduler caller,
+    ThreadPool::Scheduler gatedReturn) {
+    TcpPublicationObservation result {};
+    std::binary_semaphore workerEntered { 0 };
+    std::binary_semaphore returnEntered { 0 };
+    std::atomic<bool> releaseWorker { false };
+    TaskGroup group {};
+    group.spawn(occupy_worker(
+        gatedReturn,
+        workerEntered,
+        releaseWorker));
+    result.workerEntered_ = workerEntered.try_acquire_for(2s);
+
+    if (result.workerEntered_) {
+        group.spawn(observe_accept(
+            listener,
+            SignallingScheduler { gatedReturn, &returnEntered },
+            result.accept_));
+        group.spawn(store_task_result(
+            observe_connect_outcome(
+                *context,
+                caller,
+                "127.0.0.1",
+                listener.local_port()),
+            result.connect_));
+        result.returnEntered_ = returnEntered.try_acquire_for(2s);
+        context.reset();
+    }
+
+    releaseWorker.store(true, std::memory_order_release);
+    releaseWorker.notify_all();
+    co_await group.join();
+    co_return result;
+}
+
+struct AcceptPublicationObservation final {
+    bool workerEntered_ {};
+    bool returnEntered_ {};
+    bool overlapRejected_ {};
+    AcceptObservation accepted_ {};
+    bool connected_ {};
+    bool overlapConnected_ {};
+};
+
+Task<AcceptPublicationObservation> reject_accept_before_publication(
+    IoContext& context,
+    TcpListener& listener,
+    RunLoop::Scheduler caller,
+    ThreadPool::Scheduler gatedReturn) {
+    AcceptPublicationObservation result {};
+    std::binary_semaphore workerEntered { 0 };
+    std::binary_semaphore returnEntered { 0 };
+    std::atomic<bool> releaseWorker { false };
+    TaskGroup group {};
+    group.spawn(occupy_worker(
+        gatedReturn,
+        workerEntered,
+        releaseWorker));
+    result.workerEntered_ = workerEntered.try_acquire_for(2s);
+
+    if (!result.workerEntered_) {
+        releaseWorker.store(true, std::memory_order_release);
+        releaseWorker.notify_all();
+        co_await group.join();
+        co_return result;
+    }
+
+    group.spawn(observe_accept(
+        listener,
+        SignallingScheduler { gatedReturn, &returnEntered },
+        result.accepted_));
+    group.spawn(connect_once_to(
+        context,
+        caller,
+        "127.0.0.1",
+        listener.local_port(),
+        result.connected_));
+    result.returnEntered_ = returnEntered.try_acquire_for(2s);
+
+    if (result.returnEntered_) {
+        group.spawn(connect_once_to(
+            context,
+            caller,
+            "127.0.0.1",
+            listener.local_port(),
+            result.overlapConnected_));
+
+        try {
+            auto overlap = co_await listener.accept(caller);
+        } catch (const std::logic_error&) {
+            result.overlapRejected_ = true;
+        } catch (...) {
+        }
+    } else {
+        listener.close();
+    }
+
+    releaseWorker.store(true, std::memory_order_release);
+    releaseWorker.notify_all();
+    co_await group.join();
+    co_return result;
+}
+
+struct AcceptCancellationObservation final {
+    AcceptObservation cancelled_ {};
+    AcceptObservation reused_ {};
+    bool overlapRejected_ {};
+    bool reconnectSucceeded_ {};
+};
+
+Task<AcceptCancellationObservation> cancel_pending_accept(
+    IoContext& context,
+    TcpListener& listener,
+    RunLoop::Scheduler returnTo,
+    std::stop_source& stopSource) {
+    AcceptCancellationObservation result {};
+    TaskGroup pending {};
+    pending.spawn(observe_accept(
+        listener,
+        returnTo,
+        result.cancelled_,
+        stopSource.get_token()));
+
+    try {
+        auto overlap = co_await listener.accept(returnTo);
+    } catch (const std::logic_error&) {
+        result.overlapRejected_ = true;
+    } catch (...) {
+    }
+
+    stopSource.request_stop();
+    co_await pending.join();
+
+    TaskGroup reuse {};
+    reuse.spawn(observe_accept(
+        listener,
+        returnTo,
+        result.reused_));
+    reuse.spawn(connect_once_to(
+        context,
+        returnTo,
+        "127.0.0.1",
+        listener.local_port(),
+        result.reconnectSucceeded_));
+    co_await reuse.join();
+    co_return result;
+}
+
+struct CloseAcceptObservation final {
+    AcceptObservation operation_ {};
+    bool overlapRejected_ {};
+};
+
+Task<CloseAcceptObservation> close_pending_accept(
+    TcpListener& listener,
+    RunLoop::Scheduler returnTo) {
+    CloseAcceptObservation result {};
+    TaskGroup group {};
+    group.spawn(observe_accept(
+        listener,
+        returnTo,
+        result.operation_));
+
+    try {
+        auto overlap = co_await listener.accept(returnTo);
+    } catch (const std::logic_error&) {
+        result.overlapRejected_ = true;
+    } catch (...) {
+    }
+
+    close_concurrently(listener);
+    co_await group.join();
+    co_return result;
+}
+
+Task<AcceptObservation> destroy_context_with_pending_accept(
+    std::unique_ptr<IoContext>& context,
+    TcpListener& listener,
+    RunLoop::Scheduler returnTo) {
+    AcceptObservation result {};
+    TaskGroup group {};
+    group.spawn(observe_accept(
+        listener,
+        returnTo,
+        result));
+
+    std::jthread destroyer { [&context] {
+        context.reset();
+    } };
+    co_await group.join();
+    destroyer.join();
+    co_return result;
+}
+
+struct AcceptRaceObservation final {
+    AcceptObservation operation_ {};
+    bool connected_ {};
+};
+
+Task<AcceptRaceObservation> run_close_accept_race(
+    TcpListener& listener,
+    RunLoop::Scheduler returnTo) {
+    AcceptRaceObservation result {};
+    TaskGroup group {};
+    group.spawn(observe_accept(
+        listener,
+        returnTo,
+        result.operation_));
+
+    std::barrier start { 2 };
+    const auto port = listener.local_port();
+    std::jthread connector { [&start, port, &result] {
+        start.arrive_and_wait();
+        asio::io_context ioContext {};
+        asio::ip::tcp::socket socket { ioContext };
+        std::error_code error {};
+        socket.connect(
+            asio::ip::tcp::endpoint {
+                asio::ip::address_v4::loopback(),
+                port
+            },
+            error);
+        result.connected_ = !error;
+    } };
+    std::jthread closer { [&listener, &start] {
+        start.arrive_and_wait();
+        listener.close();
+    } };
+
+    co_await group.join();
+    connector.join();
+    closer.join();
+    co_return result;
+}
+
+struct AcceptRaceCounts final {
+    int succeeded_ {};
+    int cancelled_ {};
+    int invalid_ {};
+    int connectionErrors_ {};
+};
+
+Task<AcceptRaceCounts> run_stop_accept_races(
+    TcpListener& listener,
+    RunLoop::Scheduler returnTo,
+    int raceCount) {
+    AcceptRaceCounts counts {};
+
+    for (int iteration { 0 }; iteration < raceCount; ++iteration) {
+        std::stop_source stopSource {};
+        AcceptObservation operation {};
+        TaskGroup group {};
+        group.spawn(observe_accept(
+            listener,
+            returnTo,
+            operation,
+            stopSource.get_token()));
+
+        std::barrier start { 2 };
+        std::atomic<bool> connected { false };
+        const auto port = listener.local_port();
+        std::jthread connector { [&start, &connected, port] {
+            start.arrive_and_wait();
+            asio::io_context ioContext {};
+            asio::ip::tcp::socket socket { ioContext };
+            std::error_code error {};
+            socket.connect(
+                asio::ip::tcp::endpoint {
+                    asio::ip::address_v4::loopback(),
+                    port
+                },
+                error);
+            connected.store(!error, std::memory_order_release);
+        } };
+        std::jthread stopper { [&start, &stopSource] {
+            start.arrive_and_wait();
+            stopSource.request_stop();
+        } };
+
+        co_await group.join();
+        connector.join();
+        stopper.join();
+
+        counts.connectionErrors_ += !connected.load(
+            std::memory_order_acquire);
+
+        if (operation.completions_ != 1 ||
+            operation.logicError_ ||
+            operation.systemError_ ||
+            operation.unexpected_) {
+            ++counts.invalid_;
+        } else if (operation.succeeded_) {
+            ++counts.succeeded_;
+        } else if (operation.cancelled_) {
+            ++counts.cancelled_;
+        } else {
+            ++counts.invalid_;
+        }
+    }
+
+    co_return counts;
+}
+
+struct ListenerLoadServerObservation final {
+    int completions_ {};
+    bool succeeded_ {};
+    bool error_ {};
+    std::thread::id resumedThread_ {};
+};
+
+Task<void> echo_accepted_stream(
+    TcpStream stream,
+    RunLoop::Scheduler returnTo,
+    ListenerLoadServerObservation& observation) {
+    try {
+        std::array<std::byte, 4> payload {};
+        std::size_t received {};
+
+        while (received < payload.size()) {
+            const auto size = co_await stream.read_some(
+                returnTo,
+                std::span { payload }.subspan(received));
+
+            if (size == 0) {
+                throw std::runtime_error { "load client closed early" };
+            }
+
+            received += size;
+        }
+
+        co_await stream.write_all(returnTo, payload);
+        observation.succeeded_ = true;
+    } catch (...) {
+        observation.error_ = true;
+    }
+
+    ++observation.completions_;
+    observation.resumedThread_ = std::this_thread::get_id();
+}
+
+struct ListenerAcceptLoopObservation final {
+    int accepted_ {};
+    int errors_ {};
+    int wrongThread_ {};
+};
+
+Task<void> accept_echo_clients(
+    TcpListener& listener,
+    RunLoop::Scheduler returnTo,
+    std::vector<ListenerLoadServerObservation>& observations,
+    ListenerAcceptLoopObservation& acceptLoop) {
+    const auto expectedThread = std::this_thread::get_id();
+    TaskGroup handlers {};
+
+    try {
+        for (auto& observation : observations) {
+            auto stream = co_await listener.accept(returnTo);
+            ++acceptLoop.accepted_;
+            acceptLoop.wrongThread_ +=
+                std::this_thread::get_id() != expectedThread;
+            handlers.spawn(echo_accepted_stream(
+                std::move(stream),
+                returnTo,
+                observation));
+        }
+    } catch (...) {
+        ++acceptLoop.errors_;
+        listener.close();
+    }
+
+    co_await handlers.join();
+}
+
+struct ListenerLoadCounts final {
+    LoadCounts clients_ {};
+    int accepted_ {};
+    int acceptErrors_ {};
+    int acceptWrongThread_ {};
+    int serverCompletions_ {};
+    int serverSuccesses_ {};
+    int serverErrors_ {};
+    int serverWrongThread_ {};
+};
+
+Task<ListenerLoadCounts> run_listener_load(
+    IoContext& context,
+    TcpListener& listener,
+    RunLoop::Scheduler returnTo,
+    std::size_t clientCount) {
+    const auto expectedThread = std::this_thread::get_id();
+    std::vector<ListenerLoadServerObservation> server(clientCount);
+    std::vector<LoadClientObservation> clients(clientCount);
+    ListenerAcceptLoopObservation acceptLoop {};
+    TaskGroup group {};
+    group.spawn(accept_echo_clients(
+        listener,
+        returnTo,
+        server,
+        acceptLoop));
+
+    for (std::size_t index {}; index < clientCount; ++index) {
+        group.spawn(run_echo_client(
+            context,
+            returnTo,
+            listener.local_port(),
+            index,
+            clients[index]));
+    }
+
+    co_await group.join();
+
+    ListenerLoadCounts counts {};
+    counts.accepted_ = acceptLoop.accepted_;
+    counts.acceptErrors_ = acceptLoop.errors_;
+    counts.acceptWrongThread_ = acceptLoop.wrongThread_;
+
+    for (const auto& observation : server) {
+        counts.serverCompletions_ += observation.completions_;
+        counts.serverSuccesses_ += observation.succeeded_;
+        counts.serverErrors_ += observation.error_;
+        counts.serverWrongThread_ +=
+            observation.resumedThread_ != expectedThread;
+    }
+
+    for (const auto& observation : clients) {
+        counts.clients_.completions_ += observation.completions_;
+        counts.clients_.invalidCompletions_ +=
+            observation.completions_ != 1;
+        counts.clients_.wrongThread_ +=
+            observation.resumedThread_ != expectedThread;
+
+        switch (observation.outcome_) {
+        case LoadOutcome::succeeded:
+            ++counts.clients_.succeeded_;
+            break;
+        case LoadOutcome::cancelled:
+            ++counts.clients_.cancelled_;
+            break;
+        case LoadOutcome::error:
+            ++counts.clients_.errors_;
+            break;
+        }
+    }
+
+    co_return counts;
+}
+
+TEST(CmpTcpTest, ListenerBindIsLazyAndOwnsTemporaryAddress) {
+    auto reservation = std::make_unique<NonListeningEndpoint>();
+    const auto port = reservation->port();
+    IoContext context {};
+    RunLoop loop {};
+    auto task = TcpListener::bind(
+        context,
+        loop.get_scheduler(),
+        std::string { "127.0.0.1" },
+        port);
+
+    reservation.reset();
+    auto listener = loop.run(std::move(task));
+
+    EXPECT_TRUE(listener.is_open());
+    EXPECT_EQ(listener.local_port(), port);
+}
+
+TEST(CmpTcpTest, ListenerBindTaskRejectsExpiredContext) {
+    RunLoop loop {};
+    std::optional<Task<TcpListener>> bindTask {};
+
+    {
+        IoContext context {};
+        bindTask.emplace(TcpListener::bind(
+            context,
+            loop.get_scheduler(),
+            "127.0.0.1",
+            0));
+    }
+
+    EXPECT_THROW(
+        loop.run(std::move(*bindTask)),
+        std::logic_error);
+}
+
+TEST(CmpTcpTest, ListenerAcceptsIpv4AndStreamSurvivesListenerClose) {
+    IoContext context {};
+    RunLoop loop {};
+    const auto callerThread = std::this_thread::get_id();
+    auto listener = loop.run(TcpListener::bind(
+        context,
+        loop.get_scheduler(),
+        "127.0.0.1",
+        0));
+
+    ASSERT_TRUE(listener.is_open());
+    ASSERT_NE(listener.local_port(), 0);
+    const auto port = listener.local_port();
+    const auto observation = loop.run(run_listener_exchange(
+        context,
+        listener,
+        loop.get_scheduler(),
+        true));
+
+    EXPECT_FALSE(listener.is_open());
+    EXPECT_EQ(listener.local_port(), port);
+    EXPECT_EQ(observation.server_.completions_, 1);
+    EXPECT_TRUE(observation.server_.succeeded_);
+    EXPECT_FALSE(observation.server_.cancelled_);
+    EXPECT_FALSE(observation.server_.error_);
+    EXPECT_EQ(observation.server_.resumedThread_, callerThread);
+    EXPECT_EQ(observation.client_.completions_, 1);
+    EXPECT_EQ(observation.client_.outcome_, LoadOutcome::succeeded);
+    EXPECT_EQ(observation.client_.resumedThread_, callerThread);
+}
+
+TEST(CmpTcpTest, ListenerAcceptsIpv6WhenLoopbackIsAvailable) {
+    {
+        LoopbackServer capability { asio::ip::address_v6::loopback() };
+
+        if (!capability.available()) {
+            GTEST_SKIP() << "IPv6 loopback unavailable: "
+                         << capability.start_error().message();
+        }
+    }
+
+    IoContext context {};
+    RunLoop loop {};
+    auto listener = loop.run(TcpListener::bind(
+        context,
+        loop.get_scheduler(),
+        "::1",
+        0));
+    const auto observation = loop.run(run_accept_connection(
+        context,
+        listener,
+        loop.get_scheduler(),
+        "::1"));
+
+    EXPECT_TRUE(observation.connected_);
+    EXPECT_EQ(observation.accepted_.completions_, 1);
+    EXPECT_TRUE(observation.accepted_.succeeded_);
+    EXPECT_EQ(observation.accepted_.resumedThread_,
+              std::this_thread::get_id());
+}
+
+TEST(CmpTcpTest, ListenerReportsBindErrorsOnReturnScheduler) {
+    NonListeningEndpoint occupied {};
+    IoContext context {};
+    RunLoop loop {};
+    const auto callerThread = std::this_thread::get_id();
+
+    const auto invalidAddress = loop.run(observe_bind_outcome(
+        context,
+        loop.get_scheduler(),
+        "not-an-address",
+        0));
+    EXPECT_EQ(invalidAddress.outcome_, BindOutcome::system_error);
+    EXPECT_EQ(invalidAddress.resumedThread_, callerThread);
+
+    const auto addressInUse = loop.run(observe_bind_outcome(
+        context,
+        loop.get_scheduler(),
+        "127.0.0.1",
+        occupied.port()));
+    EXPECT_EQ(addressInUse.outcome_, BindOutcome::system_error);
+    EXPECT_EQ(addressInUse.resumedThread_, callerThread);
+}
+
+TEST(CmpTcpTest, ListenerPreCancellationSkipsInvalidAddressParsing) {
+    IoContext context {};
+    RunLoop loop {};
+    std::stop_source stopSource {};
+    stopSource.request_stop();
+
+    const auto observation = loop.run(observe_bind_outcome(
+        context,
+        loop.get_scheduler(),
+        "not-an-address",
+        0,
+        stopSource.get_token()));
+
+    EXPECT_EQ(observation.outcome_, BindOutcome::cancelled);
+    EXPECT_EQ(observation.resumedThread_, std::this_thread::get_id());
+}
+
+TEST(CmpTcpTest, ListenerCanReturnThroughThreadPoolScheduler) {
+    IoContext context {};
+    ThreadPool returnWorkers { 1 };
+    RunLoop loop {};
+    const auto callerThread = std::this_thread::get_id();
+    const auto resumedThread = loop.run(bind_and_observe(
+        context,
+        returnWorkers.get_scheduler(),
+        "127.0.0.1",
+        0));
+
+    EXPECT_NE(resumedThread, callerThread);
+}
+
+TEST(CmpTcpTest, ListenerInvalidReturnSchedulerClosesBoundSocket) {
+    auto reservation = std::make_unique<NonListeningEndpoint>();
+    const auto port = reservation->port();
+    reservation.reset();
+
+    IoContext context {};
+    RunLoop driver {};
+    RunLoop inactive {};
+
+    EXPECT_THROW(
+        driver.run(TcpListener::bind(
+            context,
+            inactive.get_scheduler(),
+            "127.0.0.1",
+            port)),
+        std::logic_error);
+
+    auto listener = driver.run(TcpListener::bind(
+        context,
+        driver.get_scheduler(),
+        "127.0.0.1",
+        port));
+    EXPECT_TRUE(listener.is_open());
+    EXPECT_EQ(listener.local_port(), port);
+}
+
+TEST(CmpTcpTest, ListenerAcceptCanReturnThroughThreadPoolScheduler) {
+    IoContext context {};
+    ThreadPool returnWorkers { 1 };
+    RunLoop loop {};
+    auto listener = loop.run(TcpListener::bind(
+        context,
+        loop.get_scheduler(),
+        "127.0.0.1",
+        0));
+    const auto observation = loop.run(run_accept_connection_with_return(
+        context,
+        listener,
+        returnWorkers.get_scheduler(),
+        loop.get_scheduler()));
+
+    EXPECT_TRUE(observation.connected_);
+    EXPECT_EQ(observation.accepted_.completions_, 1);
+    EXPECT_TRUE(observation.accepted_.succeeded_);
+    EXPECT_NE(observation.accepted_.resumedThread_,
+              std::this_thread::get_id());
+    EXPECT_TRUE(listener.is_open());
+}
+
+TEST(CmpTcpTest, ListenerInvalidAcceptReturnSchedulerKeepsItUsable) {
+    IoContext context {};
+    RunLoop driver {};
+    RunLoop inactive {};
+    auto listener = driver.run(TcpListener::bind(
+        context,
+        driver.get_scheduler(),
+        "127.0.0.1",
+        0));
+    const auto observation = driver.run(
+        run_accept_connection_with_return(
+            context,
+            listener,
+            inactive.get_scheduler(),
+            driver.get_scheduler()));
+
+    EXPECT_TRUE(observation.connected_);
+    EXPECT_EQ(observation.accepted_.completions_, 1);
+    EXPECT_FALSE(observation.accepted_.succeeded_);
+    EXPECT_TRUE(observation.accepted_.logicError_);
+    EXPECT_FALSE(observation.accepted_.cancelled_);
+    EXPECT_FALSE(observation.accepted_.systemError_);
+    EXPECT_FALSE(observation.accepted_.unexpected_);
+    EXPECT_TRUE(listener.is_open());
+
+    const auto reuse = driver.run(run_accept_connection(
+        context,
+        listener,
+        driver.get_scheduler(),
+        "127.0.0.1"));
+    EXPECT_TRUE(reuse.connected_);
+    EXPECT_TRUE(reuse.accepted_.succeeded_);
+}
+
+TEST(CmpTcpTest, ListenerRejectsOverlapUntilAcceptedStreamIsPublished) {
+    IoContext context {};
+    ThreadPool gatedReturn { 1 };
+    RunLoop loop {};
+    auto listener = loop.run(TcpListener::bind(
+        context,
+        loop.get_scheduler(),
+        "127.0.0.1",
+        0));
+    const auto observation = loop.run(reject_accept_before_publication(
+        context,
+        listener,
+        loop.get_scheduler(),
+        gatedReturn.get_scheduler()));
+
+    EXPECT_TRUE(observation.workerEntered_);
+    EXPECT_TRUE(observation.returnEntered_);
+    EXPECT_TRUE(observation.overlapRejected_);
+    EXPECT_TRUE(observation.connected_);
+    EXPECT_TRUE(observation.overlapConnected_);
+    EXPECT_EQ(observation.accepted_.completions_, 1);
+    EXPECT_TRUE(observation.accepted_.succeeded_);
+    EXPECT_FALSE(observation.accepted_.cancelled_);
+    EXPECT_FALSE(observation.accepted_.logicError_);
+    EXPECT_FALSE(observation.accepted_.systemError_);
+    EXPECT_FALSE(observation.accepted_.unexpected_);
+    EXPECT_NE(observation.accepted_.resumedThread_,
+              std::this_thread::get_id());
+    EXPECT_TRUE(listener.is_open());
+}
+
+TEST(CmpTcpTest, ListenerPreCancelledAcceptLeavesItUsable) {
+    IoContext context {};
+    RunLoop loop {};
+    std::stop_source stopSource {};
+    stopSource.request_stop();
+    auto listener = loop.run(TcpListener::bind(
+        context,
+        loop.get_scheduler(),
+        "127.0.0.1",
+        0));
+
+    EXPECT_THROW(
+        loop.run(listener.accept(
+            loop.get_scheduler(),
+            stopSource.get_token())),
+        OperationCancelled);
+    EXPECT_TRUE(listener.is_open());
+
+    const auto reuse = loop.run(run_accept_connection(
+        context,
+        listener,
+        loop.get_scheduler(),
+        "127.0.0.1"));
+    EXPECT_TRUE(reuse.connected_);
+    EXPECT_TRUE(reuse.accepted_.succeeded_);
+}
+
+TEST(CmpTcpTest, ListenerCancelsPendingAcceptAndCanAcceptAgain) {
+    IoContext context {};
+    RunLoop loop {};
+    std::stop_source stopSource {};
+    auto listener = loop.run(TcpListener::bind(
+        context,
+        loop.get_scheduler(),
+        "127.0.0.1",
+        0));
+    const auto observation = loop.run(cancel_pending_accept(
+        context,
+        listener,
+        loop.get_scheduler(),
+        stopSource));
+
+    EXPECT_TRUE(observation.overlapRejected_);
+    EXPECT_EQ(observation.cancelled_.completions_, 1);
+    EXPECT_TRUE(observation.cancelled_.cancelled_);
+    EXPECT_FALSE(observation.cancelled_.succeeded_);
+    EXPECT_FALSE(observation.cancelled_.logicError_);
+    EXPECT_FALSE(observation.cancelled_.systemError_);
+    EXPECT_FALSE(observation.cancelled_.unexpected_);
+    EXPECT_EQ(observation.cancelled_.resumedThread_,
+              std::this_thread::get_id());
+    EXPECT_TRUE(observation.reconnectSucceeded_);
+    EXPECT_EQ(observation.reused_.completions_, 1);
+    EXPECT_TRUE(observation.reused_.succeeded_);
+    EXPECT_TRUE(listener.is_open());
+}
+
+TEST(CmpTcpTest, ListenerCloseCancelsPendingAcceptAndIsIdempotent) {
+    IoContext context {};
+    RunLoop loop {};
+    auto listener = loop.run(TcpListener::bind(
+        context,
+        loop.get_scheduler(),
+        "127.0.0.1",
+        0));
+    const auto port = listener.local_port();
+    const auto observation = loop.run(close_pending_accept(
+        listener,
+        loop.get_scheduler()));
+
+    EXPECT_TRUE(observation.overlapRejected_);
+    EXPECT_EQ(observation.operation_.completions_, 1);
+    EXPECT_TRUE(observation.operation_.cancelled_);
+    EXPECT_FALSE(observation.operation_.succeeded_);
+    EXPECT_FALSE(observation.operation_.logicError_);
+    EXPECT_FALSE(observation.operation_.systemError_);
+    EXPECT_FALSE(observation.operation_.unexpected_);
+    EXPECT_FALSE(listener.is_open());
+    EXPECT_EQ(listener.local_port(), port);
+    EXPECT_NO_THROW(listener.close());
+    EXPECT_THROW(
+        loop.run(listener.accept(loop.get_scheduler())),
+        std::logic_error);
+}
+
+TEST(CmpTcpTest, ListenerMoveTransfersCloseOwnership) {
+    IoContext context {};
+    RunLoop loop {};
+    auto listener = loop.run(TcpListener::bind(
+        context,
+        loop.get_scheduler(),
+        "127.0.0.1",
+        0));
+    const auto port = listener.local_port();
+    TcpListener moved { std::move(listener) };
+
+    EXPECT_FALSE(listener.is_open());
+    EXPECT_EQ(listener.local_port(), 0);
+    EXPECT_NO_THROW(listener.close());
+    EXPECT_THROW(
+        loop.run(listener.accept(loop.get_scheduler())),
+        std::logic_error);
+    EXPECT_TRUE(moved.is_open());
+    EXPECT_EQ(moved.local_port(), port);
+
+    moved.close();
+    EXPECT_FALSE(moved.is_open());
+    EXPECT_EQ(moved.local_port(), port);
+}
+
+TEST(CmpTcpTest, ListenerAcceptTaskSurvivesHandleMove) {
+    IoContext context {};
+    RunLoop loop {};
+    auto listener = loop.run(TcpListener::bind(
+        context,
+        loop.get_scheduler(),
+        "127.0.0.1",
+        0));
+    const auto port = listener.local_port();
+    auto acceptTask = listener.accept(loop.get_scheduler());
+    TcpListener moved { std::move(listener) };
+    bool connected {};
+    std::jthread connector { [port, &connected] {
+        asio::io_context ioContext {};
+        asio::ip::tcp::socket socket { ioContext };
+        std::error_code error {};
+        socket.connect(
+            asio::ip::tcp::endpoint {
+                asio::ip::address_v4::loopback(),
+                port
+            },
+            error);
+        connected = !error;
+    } };
+
+    auto stream = loop.run(std::move(acceptTask));
+    connector.join();
+
+    EXPECT_TRUE(connected);
+    EXPECT_TRUE(stream.is_open());
+    EXPECT_TRUE(moved.is_open());
+}
+
+TEST(CmpTcpTest, ListenerContextShutdownDrainsPendingAccept) {
+    auto context = std::make_unique<IoContext>();
+    RunLoop loop {};
+    auto listener = loop.run(TcpListener::bind(
+        *context,
+        loop.get_scheduler(),
+        "127.0.0.1",
+        0));
+    const auto port = listener.local_port();
+    const auto observation = loop.run(
+        destroy_context_with_pending_accept(
+            context,
+            listener,
+            loop.get_scheduler()));
+
+    EXPECT_FALSE(context);
+    EXPECT_EQ(observation.completions_, 1);
+    EXPECT_TRUE(observation.cancelled_);
+    EXPECT_FALSE(observation.succeeded_);
+    EXPECT_FALSE(observation.logicError_);
+    EXPECT_FALSE(observation.systemError_);
+    EXPECT_FALSE(observation.unexpected_);
+    EXPECT_EQ(observation.resumedThread_, std::this_thread::get_id());
+    EXPECT_FALSE(listener.is_open());
+    EXPECT_EQ(listener.local_port(), port);
+    EXPECT_THROW(
+        loop.run(listener.accept(loop.get_scheduler())),
+        std::logic_error);
+    EXPECT_NO_THROW(listener.close());
+}
+
+TEST(CmpTcpTest, ContextShutdownRejectsUnpublishedTcpResources) {
+    RunLoop loop {};
+    const auto callerThread = std::this_thread::get_id();
+
+    {
+        auto context = std::make_unique<IoContext>();
+        ThreadPool gatedReturn { 1 };
+        const auto observation = loop.run(
+            destroy_context_before_bind_publication(
+                context,
+                gatedReturn.get_scheduler()));
+
+        EXPECT_FALSE(context);
+        EXPECT_TRUE(observation.workerEntered_);
+        EXPECT_TRUE(observation.returnEntered_);
+        EXPECT_EQ(observation.bind_.outcome_, BindOutcome::cancelled);
+        EXPECT_NE(observation.bind_.resumedThread_, callerThread);
+    }
+
+    {
+        auto context = std::make_unique<IoContext>();
+        ThreadPool gatedReturn { 1 };
+        auto listener = loop.run(TcpListener::bind(
+            *context,
+            loop.get_scheduler(),
+            "127.0.0.1",
+            0));
+        const auto observation = loop.run(
+            destroy_context_before_tcp_publication(
+                context,
+                listener,
+                loop.get_scheduler(),
+                gatedReturn.get_scheduler()));
+
+        EXPECT_FALSE(context);
+        EXPECT_TRUE(observation.workerEntered_);
+        EXPECT_TRUE(observation.returnEntered_);
+        EXPECT_EQ(observation.connect_.outcome_, ConnectOutcome::cancelled);
+        EXPECT_EQ(observation.connect_.resumedThread_, callerThread);
+        EXPECT_EQ(observation.accept_.completions_, 1);
+        EXPECT_TRUE(observation.accept_.cancelled_);
+        EXPECT_FALSE(observation.accept_.succeeded_);
+        EXPECT_FALSE(observation.accept_.logicError_);
+        EXPECT_FALSE(observation.accept_.systemError_);
+        EXPECT_FALSE(observation.accept_.unexpected_);
+        EXPECT_NE(observation.accept_.resumedThread_, callerThread);
+        EXPECT_FALSE(listener.is_open());
+    }
+}
+
+TEST(CmpTcpTest, ListenerCloseCompletionRaceChoosesOneOutcome) {
+    constexpr int RACE_COUNT { 20 };
+    IoContext context {};
+    RunLoop loop {};
+    int succeeded {};
+    int cancelled {};
+    int invalid {};
+
+    for (int iteration { 0 }; iteration < RACE_COUNT; ++iteration) {
+        auto listener = loop.run(TcpListener::bind(
+            context,
+            loop.get_scheduler(),
+            "127.0.0.1",
+            0));
+        const auto observation = loop.run(run_close_accept_race(
+            listener,
+            loop.get_scheduler()));
+
+        if (observation.operation_.completions_ != 1 ||
+            observation.operation_.logicError_ ||
+            observation.operation_.systemError_ ||
+            observation.operation_.unexpected_) {
+            ++invalid;
+        } else if (observation.operation_.succeeded_) {
+            ++succeeded;
+        } else if (observation.operation_.cancelled_) {
+            ++cancelled;
+        } else {
+            ++invalid;
+        }
+
+        EXPECT_FALSE(listener.is_open());
+    }
+
+    EXPECT_EQ(succeeded + cancelled, RACE_COUNT);
+    EXPECT_EQ(invalid, 0);
+}
+
+TEST(CmpTcpTest, ListenerStopCompletionRaceChoosesOneOutcome) {
+    constexpr int RACE_COUNT { 100 };
+    IoContext context {};
+    RunLoop loop {};
+    auto listener = loop.run(TcpListener::bind(
+        context,
+        loop.get_scheduler(),
+        "127.0.0.1",
+        0));
+    const auto counts = loop.run(run_stop_accept_races(
+        listener,
+        loop.get_scheduler(),
+        RACE_COUNT));
+
+    EXPECT_EQ(counts.succeeded_ + counts.cancelled_, RACE_COUNT);
+    EXPECT_EQ(counts.invalid_, 0);
+    EXPECT_EQ(counts.connectionErrors_, 0);
+    EXPECT_TRUE(listener.is_open());
+}
+
+TEST(CmpTcpTest, ListenerManyConcurrentClientsCompleteExactlyOnce) {
+    constexpr std::size_t CLIENT_COUNT { 32 };
+    IoContext context {};
+    RunLoop loop {};
+    auto listener = loop.run(TcpListener::bind(
+        context,
+        loop.get_scheduler(),
+        "127.0.0.1",
+        0));
+    const auto counts = loop.run(run_listener_load(
+        context,
+        listener,
+        loop.get_scheduler(),
+        CLIENT_COUNT));
+
+    EXPECT_EQ(counts.accepted_, static_cast<int>(CLIENT_COUNT));
+    EXPECT_EQ(counts.acceptErrors_, 0);
+    EXPECT_EQ(counts.acceptWrongThread_, 0);
+    EXPECT_EQ(counts.serverCompletions_, static_cast<int>(CLIENT_COUNT));
+    EXPECT_EQ(counts.serverSuccesses_, static_cast<int>(CLIENT_COUNT));
+    EXPECT_EQ(counts.serverErrors_, 0);
+    EXPECT_EQ(counts.serverWrongThread_, 0);
+    EXPECT_EQ(counts.clients_.completions_,
+              static_cast<int>(CLIENT_COUNT));
+    EXPECT_EQ(counts.clients_.succeeded_,
+              static_cast<int>(CLIENT_COUNT));
+    EXPECT_EQ(counts.clients_.cancelled_, 0);
+    EXPECT_EQ(counts.clients_.errors_, 0);
+    EXPECT_EQ(counts.clients_.invalidCompletions_, 0);
+    EXPECT_EQ(counts.clients_.wrongThread_, 0);
+    EXPECT_TRUE(listener.is_open());
 }
 
 TEST(CmpTcpTest, IoContextStartsAndStopsCleanly) {

@@ -15,9 +15,10 @@ have `std::stop_token` overloads for cooperative cancellation; timed scheduling 
 absolute `steady_clock` deadlines without a timer thread. `ThreadPool::Scheduler::schedule()`
 explicitly transfers a continuation to any fixed worker and has the same cancellation-winner rule.
 `run_blocking()` uses a caller-selected ThreadPool instance for synchronous work and publishes the
-outcome only after an explicit return Scheduler is reached. Phase 6B adds an immovable `IoContext`
-with one private driver and a move-only `TcpStream` for native async numeric-address TCP clients;
-all public outcomes still pass through an explicit caller-selected Scheduler.
+outcome only after an explicit return Scheduler is reached. Phase 6B/6C add an immovable
+`IoContext` with one private driver, a move-only `TcpStream`, and a move-only `TcpListener` for
+native async numeric-address TCP clients and servers; all public outcomes still pass through an
+explicit caller-selected Scheduler.
 
 The repository contains:
 
@@ -108,7 +109,7 @@ excluded by `.gitignore`.
 ## Build and tests
 
 `.xlings.json` pins the mcpp version used by the project. `mcpp build` builds the inferred library
-target. `mcpp test` discovers ten test files and links a gtest entry point for each. The 140 tests
+target. `mcpp test` discovers ten test files and links a gtest entry point for each. The 161 tests
 verify Task ownership and symmetric transfer together with structured joins, root execution,
 scheduling, exception propagation, timed and cross-thread wake-up, cancellation races, invalid
 scheduler use, loop reuse, stack-safe repeated completion, and TCP lifecycle/load behavior.
@@ -442,10 +443,10 @@ thread on which the coroutine currently executes.
 - the return schedule is intentionally uncancellable so every outcome reaches one executor;
 - this is thread-based isolation and does not claim native non-blocking I/O.
 
-`IoContext` and `TcpStream` have the following contract:
+`IoContext`, `TcpStream`, and `TcpListener` have the following contract:
 
 - one immovable context owns one private I/O driver and may be shared by many streams;
-- a move-only stream connects only to numeric IPv4/IPv6 text; DNS and listening APIs are absent;
+- a move-only stream connects only to numeric IPv4/IPv6 text; DNS is absent;
 - `connect()`, `read_some()`, and `write_all()` are lazy Tasks and publish success or failure only
   after the explicit return Scheduler hop;
 - read/write spans borrow their storage until the Task completes; a stream permits one pending read
@@ -455,7 +456,14 @@ thread on which the coroutine currently executes.
   closes the stream;
 - `close()` is thread-safe, idempotent, and non-blocking; close and context shutdown cancel accepted
   operations exactly once when they win the completion race;
-- Phase 6A isolates arbitrary synchronous work on threads, while Phase 6B is native async TCP only.
+- a move-only listener lazily binds numeric IPv4/IPv6 text, accepts port zero, and exposes the
+  selected port through `local_port()`;
+- one accept may be pending; pre/active cancellation leaves the listener usable, while listener
+  close or context shutdown cancels that accept exactly once when it wins;
+- a successful accept returns an ordinary `TcpStream`; closing the listener does not close streams
+  already accepted;
+- Phase 6A isolates arbitrary synchronous work on threads, while Phase 6B/6C are native async TCP
+  only.
 
 There is no public free-standing `sync_wait`, detached execution, standalone Timer handle,
 generic asynchronous-I/O hierarchy, custom frame allocator, or distinct blocking-pool type.
@@ -479,7 +487,7 @@ package contract:
 1. TaskGroup result handles and additional cancellation-aware primitives;
 2. channels and additional structured wake-up paths;
 3. profile-guided work stealing if representative workloads justify it;
-4. additional native I/O families such as DNS, listeners, TLS, or files;
+4. additional native I/O families such as DNS, TLS, or files;
 5. result adapters and optional coroutine-frame allocation strategies.
 
 Task, cancellation, RunLoop, ThreadPool, blocking offload, TCP, `when_all`, TaskGroup, OneShotEvent,
@@ -500,15 +508,16 @@ cd examples/basic
 mcpp run
 ```
 
-The expected result is a successful library build, 140 passing tests across ten binaries, and an
+The expected result is a successful library build, 161 passing tests across ten binaries, and an
 example that prints `Coroutine result: 42`, `Concurrent result: 42`, `Worker pool result: 42`,
 `Blocking result: 42`, `Task group result: 42`, `Recursive group result: 3`, `Event signalled`,
 `Reusable event cycles: 2`, `Mutex result: 42`, then
 `Coroutine cancelled` and exits with status 0. Tests retain the existing high-volume stack checks
 and add 20,000 recursive TaskGroup admissions, 100,000 pre-cancelled ready schedules, 50,000 manual
 event waiters, 20,000 nested reusable-event signals, set/cancel races, queued blocking cancellation,
-5,000 concurrent blocking offloads, a 32-client TCP load, and repeated TCP close/stop completion
-races. Focused race suites pass repeated Release runs. Compute,
+5,000 concurrent blocking offloads, 32-client stream and listener loads, repeated stream
+close/stop races, and 100 close/accept plus 500 stop/accept race gates. Focused race suites pass
+repeated Release runs. Compute,
 temporary-file, and loopback-network counts and
 throughput are recorded in the
 [v1 readiness benchmark](benchmarks/2026-08-29-cmp-v1-readiness.md). ThreadPool counts, concurrency,

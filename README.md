@@ -21,9 +21,9 @@
 > CMP provides a lazy, single-consumer `Task<T>` / `Task<void>`, structured variadic and vector
 > `when_all()`, an eager structured `TaskGroup`, one-shot and reusable events, an RAII `AsyncMutex`,
 > a caller-thread `RunLoop` with explicit and monotonic timed scheduling, and a fixed-size CPU
-> `ThreadPool`. Phase 6B adds an explicit `IoContext` and move-only `TcpStream` for native async
-> numeric-address TCP clients. `run_blocking()` executes an owned synchronous callable on a
-> dedicated pool instance
+> `ThreadPool`. Phase 6B/6C add an explicit `IoContext`, move-only `TcpStream`, and move-only
+> `TcpListener` for native async numeric-address TCP clients and servers. `run_blocking()` executes
+> an owned synchronous callable on a dedicated pool instance
 > and delivers its outcome through an explicit return Scheduler. Ready scheduling on either
 > executor, timed waits, reusable-event waits, TaskGroup children, and queued blocking offloads can
 > use explicit cooperative cancellation with `std::stop_token`; TCP operations use the same token
@@ -32,8 +32,8 @@
 CMP is being built as a modern coroutine runtime and library on standard stackless C++
 coroutines. Its explicit `co_await` model now covers fixed and incremental structured concurrency,
 one-time event notification, caller-thread and multi-worker scheduling, monotonic timers, and
-cancellable waits, structured isolation of blocking work, and one portable native async TCP client
-slice.
+cancellable waits, structured isolation of blocking work, and portable native async TCP client and
+listener slices.
 
 ## Why CMP?
 
@@ -61,8 +61,8 @@ promise that:
 - task migration is implicit, work stealing is already enabled, or every I/O family is async.
 
 Those capabilities must be designed and verified individually. CMP now uses an explicitly
-dedicated `ThreadPool` instance with `run_blocking()` for synchronous work. Phase 6B provides native
-async TCP clients; DNS, listening sockets, TLS, file I/O, and cooperative safe points remain
+dedicated `ThreadPool` instance with `run_blocking()` for synchronous work. Phase 6B/6C provide
+native async TCP clients and listeners; DNS, TLS, file I/O, and cooperative safe points remain
 separate work.
 
 ## Quick Start
@@ -103,6 +103,7 @@ using mcpplibs::cmp::OneShotEvent;
 using mcpplibs::cmp::TaskGroup;
 using mcpplibs::cmp::ThreadPool;
 using mcpplibs::cmp::IoContext;
+using mcpplibs::cmp::TcpListener;
 using mcpplibs::cmp::TcpStream;
 using mcpplibs::cmp::run_blocking;
 using mcpplibs::cmp::when_all;
@@ -343,6 +344,16 @@ Task<std::size_t> exchange(
     co_await stream.write_all(caller, request, token);
     co_return co_await stream.read_some(caller, reply, token);
 }
+
+Task<TcpStream> accept_one(
+    IoContext& io,
+    RunLoop::Scheduler caller,
+    std::uint16_t port,
+    std::stop_token token = {}) {
+    auto listener = co_await TcpListener::bind(
+        io, caller, "127.0.0.1", port, token);
+    co_return co_await listener.accept(caller, token);
+}
 ```
 
 Share one immovable `IoContext` across streams; it owns one private I/O driver. `TcpStream` is
@@ -351,9 +362,12 @@ Read/write spans borrow their storage until the returned Task completes. Every s
 attempts the explicit return-Scheduler hop. One read and one write may coexist; another operation
 in the same direction throws `std::logic_error`. Pre-cancellation leaves an open stream usable,
 while cancellation after `write_all()` starts closes it. `close()` is thread-safe, idempotent, and
-causes accepted operations to complete once with `OperationCancelled` when close wins. Phase 6A
-isolates arbitrary synchronous calls on ThreadPool workers; Phase 6B is native async TCP, not a
-generic async-I/O layer.
+causes accepted operations to complete once with `OperationCancelled` when close wins.
+`TcpListener::bind()` performs numeric bind-and-listen, accepts port zero, and exposes the selected
+port through `local_port()`. One accept may be pending; pre/active accept cancellation leaves the
+listener usable, while close cancels the pending accept. Accepted streams are independent from the
+listener. Phase 6A isolates arbitrary synchronous calls on ThreadPool workers; Phase 6B/6C are
+native async TCP, not a generic async-I/O layer.
 
 RunLoop is not a background thread and does not make blocking code asynchronous. A Task that
 suspends without arranging a future resume can leave `run()` waiting indefinitely. CMP does not
@@ -372,7 +386,7 @@ await the desired Scheduler to return to its RunLoop.
 ├── src/run_loop.cppm         # RunLoop and Scheduler partition
 ├── src/thread_pool.cppm      # fixed-size CPU worker scheduler
 ├── src/blocking.cppm         # structured blocking-call offload
-├── src/tcp.cppm              # native async TCP client and I/O context
+├── src/tcp.cppm              # native async TCP client/server and I/O context
 ├── src/when_all.cppm         # structured concurrent Task join
 ├── src/task_group.cppm       # eager mutable structured Task scope
 ├── src/one_shot_event.cppm   # allocation-free one-time notification
@@ -416,7 +430,7 @@ global mcpp installation.
 
 CMP does not track `mcpp.lock`; `.gitignore` enforces that repository policy. Runtime dependencies
 belong in `[dependencies]`; gtest is declared explicitly under `[dev-dependencies.compat]`.
-The current local suite contains 140 tests across ten binaries. The POSIX-only Release pressure
+The current local suite contains 161 tests across ten binaries. The POSIX-only Release pressure
 consumer and its recorded success/failure data are documented in the
 [v1 readiness benchmark](docs/benchmarks/2026-08-29-cmp-v1-readiness.md).
 Multi-worker correctness and performance data are documented in the
@@ -434,7 +448,8 @@ Runtime work is split into independently reviewable phases:
 5. fixed-size multi-worker scheduling — implemented and benchmarked; work stealing remains gated
    by profiling evidence;
 6. structured blocking offload and native async numeric-address TCP client — implemented and
-   verified by Linux, macOS, and Windows CI in PR #10.
+   verified by Linux, macOS, and Windows CI in PR #10; the TCP listener slice is implemented
+   locally and awaits its cross-platform CI gate.
 
 The remaining order is directional, not a promise that a listed feature is already implemented.
 

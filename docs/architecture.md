@@ -506,10 +506,12 @@ mcpp build --profile release --strict --cache=off
 mcpp test --profile release --strict --cache=off
 cd examples/basic
 mcpp run
+mcpp build --profile release --strict --cache=off
 ```
 
-The expected result is a successful library build, 161 passing tests across ten binaries, and an
-example that prints `Coroutine result: 42`, `Concurrent result: 42`, `Worker pool result: 42`,
+The expected result is successful Dev/Release library and example builds, 161 passing tests across
+ten binaries, and an example that prints `Coroutine result: 42`, `Concurrent result: 42`,
+`Worker pool result: 42`,
 `Blocking result: 42`, `Task group result: 42`, `Recursive group result: 3`, `Event signalled`,
 `Reusable event cycles: 2`, `Mutex result: 42`, then
 `Coroutine cancelled` and exits with status 0. Tests retain the existing high-volume stack checks

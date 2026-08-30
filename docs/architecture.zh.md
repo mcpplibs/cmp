@@ -472,9 +472,11 @@ mcpp build --profile release --strict --cache=off
 mcpp test --profile release --strict --cache=off
 cd examples/basic
 mcpp run
+mcpp build --profile release --strict --cache=off
 ```
 
-预期结果是库构建成功、十个二进制中的 161 项测试全部通过，并且示例依次输出
+预期结果是库和示例的 Dev/Release 构建成功、十个二进制中的 161 项测试全部通过，并且
+示例依次输出
 `Coroutine result: 42`、`Concurrent result: 42`、`Worker pool result: 42`、
 `Blocking result: 42`、`Task group result: 42`、`Recursive group result: 3`、`Event signalled`、
 `Reusable event cycles: 2`、

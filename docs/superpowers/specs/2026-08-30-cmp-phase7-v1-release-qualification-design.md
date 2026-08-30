@@ -1,9 +1,9 @@
 # CMP Phase 7 v1 Release Qualification Design
 
 **Date:** 2026-08-30
-**Status:** Reviewed design; implementation waits for Phase 6C merge and a new branch
+**Status:** Implemented locally; Phase 7 PR, CI, and publication pending
 **Package version:** `0.1.0`
-**Baseline:** Phase 6C local tree, 161/161 Dev and Release tests
+**Baseline:** Phase 6C PR #11 merged as `02cb6b9`, 161/161 Dev and Release tests
 
 ## Purpose
 
@@ -40,6 +40,10 @@ Phase 7 implementation starts only after:
 
 The Design and Plan may exist before that gate. Runtime, CI, version, and release-file changes may
 not be mixed into the Phase 6C implementation branch.
+
+The gate was satisfied on 2026-08-30: PR #11 passed Linux x86_64, macOS arm64, and Windows x86_64,
+was merged with authorization, local `main` was fast-forwarded to `02cb6b9`, and the dedicated
+Phase 7 branch was created.
 
 ## Release Candidate Contract
 
@@ -144,6 +148,33 @@ The package manifest already owns that information.
 Do not add a second packager, release script, checked-in generated descriptor, or checked-in
 archive. mcpp already owns those transformations.
 
+## Local Qualification Evidence
+
+The Phase 7 branch completed the local gates on 2026-08-30:
+
+- strict cache-off Dev and Release root builds passed; both suites ran 10 binaries and all
+  161 tests passed;
+- the standalone example ran with its expected ten lines and its strict cache-off Release build
+  passed;
+- five Release readiness rounds preserved the exact hard counts in every round: compute
+  `49,000/1,000/0`, file I/O `1,000/100/0`, and network `20,000/100/0` for
+  success/expected failure/unexpected failure;
+- the five-round medians were `38.475 ms / 1,299,546.0 ops/s` for compute,
+  `217.363 ms / 5,060.7 ops/s` for file I/O, and
+  `2,622.017 ms / 7,665.9 ops/s` for network;
+- all three edited workflows parsed as YAML and contain the same release commands;
+- an early `mcpp publish --dry-run --allow-dirty` from committed merged Phase 6C produced
+  `cmp-0.1.0.tar.gz` (206,341 bytes, provisional SHA-256
+  `fe36976fe76225f6121cce81ca22a1b2392a833795795fb9a00ed52d98dba4de`);
+- the normalized temporary descriptor parsed as native-package Form A, and the extracted archive
+  passed strict cache-off Dev and Release root builds and all 161 tests, the example run, and its
+  Release build.
+
+That archive intentionally excludes the dirty Phase 7 workflow and documentation edits. It proves
+the merged Phase 6C package contents and transformation only. The authoritative archive and hash
+must be regenerated from clean merged Phase 7. No runtime source or test file changed in this local
+qualification, so no new analyzer run was required.
+
 ## Remote Release Boundary
 
 These are distinct, separately authorized remote operations:
@@ -209,7 +240,7 @@ The reviews corrected seven likely scope errors:
 6. Treat mcpp's generated descriptor as a starting point, not index-ready truth: the pinned tool
    emits an invalid inline source segment and the index requires the atomic name plus Form A.
 7. Do not mistake `--allow-dirty` for packaging dirty content. Its archive covers the committed
-   baseline, so final Phase 6C package evidence must wait for a clean merged candidate.
+   baseline, so final Phase 7 package evidence must wait for a clean merged candidate.
 
 ## Final Roadmap Boundary
 

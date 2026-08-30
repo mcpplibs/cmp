@@ -421,10 +421,13 @@ mcpp build --profile dev --strict --cache=off
 mcpp test --profile dev --strict --cache=off
 mcpp build --profile release --strict --cache=off
 mcpp test --profile release --strict --cache=off
-cd examples/basic && mcpp run
+cd examples/basic
+mcpp run
+mcpp build --profile release --strict --cache=off
 ```
 
-CI runs the equivalent build, test, and standalone example flow on Linux, macOS, and Windows.
+CI runs the same strict cache-off Dev/Release library gates on Linux, macOS, and Windows. It also
+runs the standalone example and its strict cache-off Release build.
 The mcpp version is pinned by `.xlings.json`; contributors should not rely on an unrelated
 global mcpp installation.
 

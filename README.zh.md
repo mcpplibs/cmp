@@ -399,11 +399,14 @@ mcpp build --profile dev --strict --cache=off
 mcpp test --profile dev --strict --cache=off
 mcpp build --profile release --strict --cache=off
 mcpp test --profile release --strict --cache=off
-cd examples/basic && mcpp run
+cd examples/basic
+mcpp run
+mcpp build --profile release --strict --cache=off
 ```
 
-CI 在 Linux、macOS 和 Windows 上执行等价的构建、测试和独立示例流程。mcpp 版本由
-`.xlings.json` 固定，不应依赖无关的全局 mcpp 安装。
+CI 在 Linux、macOS 和 Windows 上执行相同的严格无缓存 Dev/Release 库门禁，同时运行独立
+示例及其严格无缓存 Release 构建。mcpp 版本由 `.xlings.json` 固定，不应依赖无关的全局
+mcpp 安装。
 
 CMP 当前不跟踪 `mcpp.lock`，`.gitignore` 明确执行这一仓库约定。运行时依赖放在
 `[dependencies]`，gtest 明确声明在 `[dev-dependencies.compat]` 中。

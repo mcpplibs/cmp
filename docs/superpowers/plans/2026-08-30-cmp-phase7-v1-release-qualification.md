@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-30
 **Design:** `docs/superpowers/specs/2026-08-30-cmp-phase7-v1-release-qualification-design.md`
-**Status:** Implemented locally; Phase 7 PR/CI and publication pending
+**Status:** PR #12 open; Windows CI correction in progress, publication pending
 **Target package:** `mcpplibs.cmp` `0.1.0`
 
 ## Execution Rule
@@ -44,9 +44,15 @@ Correct only factual mismatches.
 Edit only `.github/workflows/ci-linux.yml`, `ci-macos.yml`, and `ci-windows.yml` unless a proven
 platform defect requires a targeted source/test fix.
 
-Replace the default-profile build/test steps with strict cache-off Dev and Release commands. Keep
-the existing pinned bootstrap and platform runner choices. Run the example once and add its strict
-cache-off Release build.
+Replace the default-profile build/test steps with strict cache-off Dev and Release commands on
+Linux and macOS. Keep the existing pinned bootstrap and platform runner choices. Run the example
+once and add its cache-off Release build.
+
+On Windows, mcpp `2026.8.28.1` with LLVM reports the known missing-depfile degradation before tests
+and `--strict` makes it fatal. Run one strict cache-off Dev probe and accept failure only when its
+warning/error set exactly matches that single degradation. Then run the same cache-off Dev/Release
+builds, all tests, example, and Release consumer build without `--strict`. Do not suppress output or
+allow any other diagnostic. If a future mcpp fixes the degradation, the strict probe passes directly.
 
 Do not add a new workflow, matrix abstraction, benchmark job, cache service, sanitizer job, or
 floating dependency.
@@ -56,7 +62,7 @@ review indentation and let GitHub Actions be the authoritative workflow parser.
 
 ## 4. Run local release qualification
 
-From the repository root:
+From the Linux qualification host's repository root:
 
 ```text
 mcpp build --profile dev --strict --cache=off
@@ -127,7 +133,7 @@ Review every changed line for:
 - Windows shell/path assumptions;
 - claims ahead of evidence;
 - generated or local files entering release inputs;
-- weakened test, strictness, or cache behavior;
+- weakened tests, an unbounded strict-mode exception, or cache behavior;
 - remote steps that blur authorization boundaries.
 
 Run whitespace/encoding checks without changing unrelated CRLF files. Update `.agent/HANDOFF.md`
@@ -179,8 +185,9 @@ Local implementation record, 2026-08-30:
   `release/phase7-v1-release-qualification`;
 - release-surface audit found no public Asio leak, version drift, missing export, or unsupported
   capability claim;
-- the existing Linux, macOS, and Windows workflows now run the same strict cache-off Dev/Release
-  root gates, example run, and example Release build; all three files parse as YAML;
+- the Linux and macOS workflows run strict cache-off Dev/Release root gates, the example, and its
+  Release build; Windows runs an exact allowlisted strict probe followed by matching cache-off
+  profiles without `--strict`; all three files parse as YAML;
 - local Dev and Release root suites each passed 10 binaries and 161/161 tests; the example run and
   Release build passed;
 - five readiness rounds preserved compute `49,000/1,000/0`, file I/O `1,000/100/0`, and network
@@ -188,9 +195,15 @@ Local implementation record, 2026-08-30:
 - the committed Phase 6C package preflight produced a provisional 206,341-byte archive with
   SHA-256 `fe36976fe76225f6121cce81ca22a1b2392a833795795fb9a00ed52d98dba4de`;
 - its normalized Form A descriptor parsed, and the extracted archive passed strict cache-off Dev
-  and Release root builds and 161 tests, the example run, and its Release build.
+  and Release root builds and 161 tests, the example run, and its Release build;
 - final local self-review confirmed that only the three existing workflows and release-state
   documentation changed; YAML structure, command parity, CRLF, and `git diff --check` passed.
+
+Project PR #12 was created with authorization. Its first Windows run proved that a universal
+`--strict` gate stops on mcpp's documented missing-depfile degradation before CMP tests execute;
+the exact-probe correction above is in progress. Its extracted Bash step passes syntax checking,
+runs successfully when strict mode succeeds, accepts a synthetic exact known degradation, and
+rejects a synthetic additional warning. That failed CI run is not release evidence.
 
 The Phase 7 project PR, three-platform CI, clean merged archive, tag, GitHub Release, mcpp-index PR,
 index CI/merge, and isolated indexed consumer check remain pending. Each remote mutation retains

@@ -1,7 +1,7 @@
 # CMP Phase 7 v1 Release Qualification Design
 
 **Date:** 2026-08-30
-**Status:** Implemented locally; Phase 7 PR, CI, and publication pending
+**Status:** PR #12 open; Windows CI correction in progress, publication pending
 **Package version:** `0.1.0`
 **Baseline:** Phase 6C PR #11 merged as `02cb6b9`, 161/161 Dev and Release tests
 
@@ -19,7 +19,8 @@ not yet made the compatibility promise implied by semantic version `1.0.0`.
 Phase 7 includes only:
 
 - freezing the public API implemented through Phase 6C;
-- strict cache-off Dev and Release CI on Linux x86_64, macOS arm64, and Windows x86_64;
+- strict cache-off Dev and Release CI on Linux x86_64 and macOS arm64, plus an allowlisted strict
+  probe and full cache-off Dev/Release CI on Windows x86_64;
 - standalone path-consumer verification in Dev and Release configurations;
 - local readiness and release-package validation;
 - checking package metadata and the generated mcpp-index descriptor;
@@ -83,8 +84,8 @@ become package inputs.
 
 ## CI Qualification
 
-Keep the three existing platform workflows and their current pinned xlings/mcpp environment. Each
-workflow must execute the same release-relevant commands:
+Keep the three existing platform workflows and their current pinned xlings/mcpp environment.
+Linux and macOS execute these release-relevant commands:
 
 ```text
 mcpp build --profile dev --strict --cache=off
@@ -95,6 +96,20 @@ cd examples/basic
 mcpp run
 mcpp build --profile release --strict --cache=off
 ```
+
+The mcpp `2026.8.28.1` Windows LLVM backend intentionally reports `build/depfile` because it cannot
+emit GNU depfiles. `--strict` converts that known incremental-build degradation into a fatal error
+before the test suite runs. The Windows workflow therefore first executes a strict cache-off Dev
+build as a probe. A failed probe is accepted only when its complete warning/error set is exactly
+the single known depfile degradation and the corresponding strict-mode summary. It then executes
+the same Dev/Release profiles and example flow without `--strict`, retaining `--cache=off` for every
+explicit build/test gate. Any different strict diagnostic, compile failure, test failure, or example
+failure remains fatal. A future mcpp version that fixes Windows depfiles makes the probe pass
+directly without changing this workflow.
+
+This exception does not hide stale objects: cache-off qualification rebuilds from source, while the
+shared manifest remains under strict validation on Linux and macOS. Requiring an impossible Windows
+strict compile would test the build tool's documented limitation instead of CMP.
 
 The example run remains the external import and runtime check. Its Release build adds a consumer
 configuration check without depending on an unstable generated executable path.
@@ -162,7 +177,8 @@ The Phase 7 branch completed the local gates on 2026-08-30:
 - the five-round medians were `38.475 ms / 1,299,546.0 ops/s` for compute,
   `217.363 ms / 5,060.7 ops/s` for file I/O, and
   `2,622.017 ms / 7,665.9 ops/s` for network;
-- all three edited workflows parsed as YAML and contain the same release commands;
+- all three edited workflows parsed as YAML and contain matching profiles and cache-off gates;
+  Windows additionally contains the exact allowlisted strict probe described above;
 - an early `mcpp publish --dry-run --allow-dirty` from committed merged Phase 6C produced
   `cmp-0.1.0.tar.gz` (206,341 bytes, provisional SHA-256
   `fe36976fe76225f6121cce81ca22a1b2392a833795795fb9a00ed52d98dba4de`);
@@ -211,7 +227,8 @@ needed.
 Phase 7 is complete only when all of the following have authoritative evidence:
 
 1. Phase 6C and Phase 7 PRs are merged without unresolved checks;
-2. strict cache-off Dev and Release suites pass all 161 tests on Linux, macOS, and Windows;
+2. strict cache-off Dev and Release suites pass all 161 tests on Linux and macOS; the allowlisted
+   Windows strict probe and cache-off Dev/Release suites pass all 161 tests;
 3. the standalone example runs and its Release consumer build passes on all three platforms;
 4. five final local readiness rounds have zero unexpected failures and exact hard counts;
 5. the clean-tree publish dry-run succeeds;
@@ -226,7 +243,7 @@ index-verified.
 
 ## Self-review Corrections
 
-The reviews corrected seven likely scope errors:
+The reviews corrected eight likely scope errors:
 
 1. Keep `0.1.0`; a first usable capability set is not evidence for a `1.0.0` compatibility promise.
 2. Reuse `mcpp publish --dry-run`; a custom release script or redundant checked-in descriptor adds
@@ -241,6 +258,8 @@ The reviews corrected seven likely scope errors:
    emits an invalid inline source segment and the index requires the atomic name plus Form A.
 7. Do not mistake `--allow-dirty` for packaging dirty content. Its archive covers the committed
    baseline, so final Phase 7 package evidence must wait for a clean merged candidate.
+8. Do not require mcpp's known Windows LLVM depfile degradation to disappear. Allowlist it with an
+   exact strict probe, then use cache-off full builds; Linux and macOS retain strict manifest gates.
 
 ## Final Roadmap Boundary
 

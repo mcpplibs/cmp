@@ -466,7 +466,7 @@ OneShotEvent、AsyncManualResetEvent 與 AsyncMutex 已形成真實的公開邊�
 
 ## 驗證
 
-在儲存庫根目錄執行：
+在 Linux 或 macOS 的儲存庫根目錄執行：
 
 ```text
 mcpp build --profile dev --strict --cache=off
@@ -490,6 +490,7 @@ mcpp build --profile release --strict --cache=off
 500 次 stop/accept 競態門檻；重點競態套件已連續執行多輪 Release 測試。計算、臨時檔案和回環
 網路的成功/失敗計數及吞吐記錄在
 [v1 可開發性壓測](benchmarks/2026-08-29-cmp-v1-readiness.md)。ThreadPool 的計數、並行和五輪
-Release 資料記錄在[執行緒池壓測](benchmarks/2026-08-29-cmp-thread-pool.md)。目前 Windows LLVM 工具鏈
-不會產生 GNU depfile；如果模組介面包含的檔案發生變更，增量建置可能沿用舊的 BMI 或
-目的檔。完整複驗時使用 `--cache=off`。
+Release 資料記錄在[執行緒池壓測](benchmarks/2026-08-29-cmp-thread-pool.md)。Windows 應使用
+workflow 中的嚴格探針，並在實際無快取門禁中移除 `--strict`。目前 Windows LLVM 工具鏈
+不會產生 GNU depfile；其 CI 嚴格探針只放行這一項已知降級，並拒絕其他 warning 或 error。
+實際 Windows 門禁使用 `--cache=off`，完整重建不會沿用舊的 BMI 或目的檔。

@@ -497,7 +497,7 @@ Further partitions or implementation units are added only when another implement
 
 ## Verification
 
-Run from the repository root:
+Run from the repository root on Linux or macOS:
 
 ```text
 mcpp build --profile dev --strict --cache=off
@@ -524,6 +524,8 @@ temporary-file, and loopback-network counts and
 throughput are recorded in the
 [v1 readiness benchmark](benchmarks/2026-08-29-cmp-v1-readiness.md). ThreadPool counts, concurrency,
 and five-round Release measurements are recorded in the
-[ThreadPool benchmark](benchmarks/2026-08-29-cmp-thread-pool.md). The current Windows LLVM toolchain
-does not emit GNU depfiles. If a file included by a module interface changes, an incremental build
-can reuse an older BMI or object; `--cache=off` is used for a full local verification.
+[ThreadPool benchmark](benchmarks/2026-08-29-cmp-thread-pool.md). On Windows, use the workflow's
+strict probe and remove `--strict` from the actual cache-off gates. The current Windows LLVM toolchain
+does not emit GNU depfiles. Its CI strict probe allows exactly that known degradation and rejects
+any other warning or error; the actual Windows gates use `--cache=off` without `--strict`, so a full
+rebuild cannot reuse an older BMI or object.

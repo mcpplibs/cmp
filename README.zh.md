@@ -392,7 +392,7 @@ RunLoop 不是后台线程，也不会把阻塞代码自动变成异步代码。
 
 ## 开发与验证
 
-本地验证路径：
+Linux 和 macOS 的本地验证路径：
 
 ```bash
 mcpp build --profile dev --strict --cache=off
@@ -404,9 +404,12 @@ mcpp run
 mcpp build --profile release --strict --cache=off
 ```
 
-CI 在 Linux、macOS 和 Windows 上执行相同的严格无缓存 Dev/Release 库门禁，同时运行独立
-示例及其严格无缓存 Release 构建。mcpp 版本由 `.xlings.json` 固定，不应依赖无关的全局
-mcpp 安装。
+Windows 应先使用 workflow 中的严格探针，并在实际无缓存门禁中去掉 `--strict`，原因见下文。
+
+CI 在三个平台都执行无缓存 Dev/Release 库门禁、独立示例及其 Release 构建；Linux 和 macOS
+保持严格模式。mcpp `2026.8.28.1` 在 Windows 上先运行严格探针，只放行已知的 LLVM depfile
+降级，再去掉 `--strict` 执行无缓存门禁；完整重建使这一增量限制无法复用旧目标文件。mcpp
+版本由 `.xlings.json` 固定，不应依赖无关的全局安装。
 
 CMP 当前不跟踪 `mcpp.lock`，`.gitignore` 明确执行这一仓库约定。运行时依赖放在
 `[dependencies]`，gtest 明确声明在 `[dev-dependencies.compat]` 中。

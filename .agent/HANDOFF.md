@@ -23,21 +23,27 @@ Phase 7 是最后一个已规划的 v1 阶段，只做发布资格验收，不�
 （`完善 v1 发布验收门禁`），当前分支已推送并跟踪
 `origin/release/phase7-v1-release-qualification`。
 
-用户已授权当前持续目标内的 Git commit 与 push。PR 创建与 PR 合并仍分别需要明确授权；
-tag、GitHub Release、mcpp-index PR 和 index 合并也必须按各自远程门禁单独授权。
+Phase 7 PR #12 已获授权并创建。首轮 Windows CI 在真正编译测试前失败：mcpp
+`2026.8.28.1` 的 Windows LLVM 后端不会生成 GNU depfile，`--strict` 将这条已知降级升级
+为失败。当前正在实现“严格探针精确放行该降级 + 实际无缓存完整门禁”的根因修正。
+
+用户已授权当前持续目标内的 Git commit 与 push。PR #12 的修改、PR 合并、tag、GitHub
+Release、mcpp-index PR 和 index 合并仍必须按各自远程门禁单独授权。
 
 ## 本阶段修改
 
 - 仅加强现有 `.github/workflows/ci-linux.yml`、`ci-macos.yml`、`ci-windows.yml`：
-  - 根包运行严格、关闭缓存的 Dev/Release build 和 test；
-  - 独立 example 运行一次，并增加严格、关闭缓存的 Release build。
+  - Linux/macOS 根包运行严格、关闭缓存的 Dev/Release build 和 test；
+  - Windows 先运行严格探针，只允许已知 depfile 降级，再执行无 `--strict` 的同配置无缓存
+    完整 build/test；
+  - 独立 example 运行一次，并增加对应平台的无缓存 Release build。
 - 三种 README 与三种架构文档同步相同的本地验证命令和真实发布状态。
 - Phase 7 Design/Plan 记录已完成的本地证据和仍待完成的远程门禁。
 - 未修改运行时 API、源码、测试、版本、依赖或打包实现。
 
 ## 本地验证
 
-- 根包 Dev：`mcpp build --profile dev --strict --cache=off` 通过；
+- 本机 Linux 根包 Dev：`mcpp build --profile dev --strict --cache=off` 通过；
   `mcpp test --profile dev --strict --cache=off` 为 10 个二进制、161/161 通过。
 - 根包 Release：`mcpp build --profile release --strict --cache=off` 通过；
   `mcpp test --profile release --strict --cache=off` 为 10 个二进制、161/161 通过。
@@ -59,6 +65,8 @@ tag、GitHub Release、mcpp-index PR 和 index 合并也必须按各自远程门
 - 本阶段没有源码或测试变更，按 Phase 7 规则无需新增 analyzer 检查。
 - 最终本地自审确认仅三个现有 workflow 与发布状态文档发生变化；三平台命令一致性、
   YAML 结构、CRLF 和 `git diff --check` 均通过。
+- Windows 严格探针通过 Bash 语法检查；在本机严格构建成功路径退出 0，合成日志验证精确
+  已知降级会放行、增加任意 warning 会失败，且临时日志由 trap 清理。
 
 ## 已知限制
 
@@ -84,11 +92,12 @@ tag、GitHub Release、mcpp-index PR 和 index 合并也必须按各自远程门
 
 ## 剩余工作
 
-1. 获得明确授权后创建 Phase 7 PR，等待 Linux、macOS、Windows 全部通过。
-2. 获得单独授权后合并 PR，同步干净 `main`，无 `--allow-dirty` 重新生成并验证正式归档。
-3. tag、GitHub Release、mcpp-index PR、index 合并和最终独立 consumer 验证按 Design 的
+1. 完成 Windows 严格探针修正的本地验证、提交和推送，等待 PR #12 三平台全部通过。
+2. PR 描述仍写着三平台统一 `--strict`；按 Git 安全规则，修正 PR 描述需要用户另行授权。
+3. 获得单独授权后合并 PR，同步干净 `main`，无 `--allow-dirty` 重新生成并验证正式归档。
+4. tag、GitHub Release、mcpp-index PR、index 合并和最终独立 consumer 验证按 Design 的
    独立授权门禁逐项执行。
 
 ## 推荐下一步
 
-停在 Phase 7 PR 创建门禁，等待用户明确授权。
+完成并推送 Windows CI 根因修正，观察 PR #12 三平台终态；不自行修改或合并 PR。

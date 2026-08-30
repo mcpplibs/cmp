@@ -23,9 +23,9 @@ Phase 7 是最后一个已规划的 v1 阶段，只做发布资格验收，不�
 （`完善 v1 发布验收门禁`），当前分支已推送并跟踪
 `origin/release/phase7-v1-release-qualification`。
 
-Phase 7 PR #12 已获授权并创建。首轮 Windows CI 在真正编译测试前失败：mcpp
-`2026.8.28.1` 的 Windows LLVM 后端不会生成 GNU depfile，`--strict` 将这条已知降级升级
-为失败。当前正在实现“严格探针精确放行该降级 + 实际无缓存完整门禁”的根因修正。
+Phase 7 PR #12 已获授权并创建。首轮 Windows CI 在真正编译测试前因 mcpp 已知 depfile
+降级失败；根因修正提交 `b2c0911`（`修正 Windows 发布验收门禁`）已通过 Linux、macOS、
+Windows 三平台。PR 当前保持 OPEN、CLEAN、MERGEABLE，尚未获得合并授权。
 
 用户已授权当前持续目标内的 Git commit 与 push。PR #12 的修改、PR 合并、tag、GitHub
 Release、mcpp-index PR 和 index 合并仍必须按各自远程门禁单独授权。
@@ -67,6 +67,9 @@ Release、mcpp-index PR 和 index 合并仍必须按各自远程门禁单独授�
   YAML 结构、CRLF 和 `git diff --check` 均通过。
 - Windows 严格探针通过 Bash 语法检查；在本机严格构建成功路径退出 0，合成日志验证精确
   已知降级会放行、增加任意 warning 会失败，且临时日志由 trap 清理。
+- PR #12 的 `b2c0911` 三平台检查全部通过：Linux 2m53s、macOS 3m08s、Windows 5m22s。
+  完整日志确认每个平台的 Dev/Release 各为 10 个二进制、161/161，example 均输出预期十行
+  并完成 Release build；Windows 探针只出现已知 depfile warning 与对应 strict 汇总。
 
 ## 已知限制
 
@@ -92,7 +95,7 @@ Release、mcpp-index PR 和 index 合并仍必须按各自远程门禁单独授�
 
 ## 剩余工作
 
-1. 完成 Windows 严格探针修正的本地验证、提交和推送，等待 PR #12 三平台全部通过。
+1. 推送本次 CI 证据状态同步，并确认 PR #12 最新 HEAD 的三平台检查仍全部通过。
 2. PR 描述仍写着三平台统一 `--strict`；按 Git 安全规则，修正 PR 描述需要用户另行授权。
 3. 获得单独授权后合并 PR，同步干净 `main`，无 `--allow-dirty` 重新生成并验证正式归档。
 4. tag、GitHub Release、mcpp-index PR、index 合并和最终独立 consumer 验证按 Design 的
@@ -100,4 +103,4 @@ Release、mcpp-index PR 和 index 合并仍必须按各自远程门禁单独授�
 
 ## 推荐下一步
 
-完成并推送 Windows CI 根因修正，观察 PR #12 三平台终态；不自行修改或合并 PR。
+推送 CI 证据状态同步并复核最新检查；不自行修改 PR 描述或合并 PR。

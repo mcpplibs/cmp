@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-30
 **Design:** `docs/superpowers/specs/2026-08-30-cmp-phase7-v1-release-qualification-design.md`
-**Status:** PR #12 open; Windows CI correction in progress, publication pending
+**Status:** PR #12 open; three-platform qualification passed, merge and publication pending
 **Target package:** `mcpplibs.cmp` `0.1.0`
 
 ## Execution Rule
@@ -201,10 +201,15 @@ Local implementation record, 2026-08-30:
 
 Project PR #12 was created with authorization. Its first Windows run proved that a universal
 `--strict` gate stops on mcpp's documented missing-depfile degradation before CMP tests execute;
-the exact-probe correction above is in progress. Its extracted Bash step passes syntax checking,
+that failed run is not release evidence. The extracted replacement probe passes syntax checking,
 runs successfully when strict mode succeeds, accepts a synthetic exact known degradation, and
-rejects a synthetic additional warning. That failed CI run is not release evidence.
+rejects a synthetic additional warning.
 
-The Phase 7 project PR, three-platform CI, clean merged archive, tag, GitHub Release, mcpp-index PR,
-index CI/merge, and isolated indexed consumer check remain pending. Each remote mutation retains
-the authorization boundary defined by the Design.
+Correction commit `b2c0911` then passed PR #12 on all three platforms: Linux x86_64 in 2m53s,
+macOS arm64 in 3m08s, and Windows x86_64 in 5m22s. Log-level verification found two suites per
+platform, each with 10 binaries and 161/161 tests, plus the expected ten-line example and Release
+consumer build. Windows also completed the exact strict probe before its cache-off gates.
+
+PR #12 merge, the clean merged archive, tag, GitHub Release, mcpp-index PR, index CI/merge, and the
+isolated indexed consumer check remain pending. Each remote mutation retains the authorization
+boundary defined by the Design.

@@ -1,7 +1,7 @@
 # CMP Phase 7 v1 Release Qualification Design
 
 **Date:** 2026-08-30
-**Status:** PR #12 open; Windows CI correction in progress, publication pending
+**Status:** PR #12 open; three-platform qualification passed, merge and publication pending
 **Package version:** `0.1.0`
 **Baseline:** Phase 6C PR #11 merged as `02cb6b9`, 161/161 Dev and Release tests
 
@@ -190,6 +190,20 @@ That archive intentionally excludes the dirty Phase 7 workflow and documentation
 the merged Phase 6C package contents and transformation only. The authoritative archive and hash
 must be regenerated from clean merged Phase 7. No runtime source or test file changed in this local
 qualification, so no new analyzer run was required.
+
+## Project PR Evidence
+
+PR #12 evaluated correction commit `b2c0911` on 2026-08-30 and passed all three workflows:
+
+- Linux x86_64 completed in 2m53s;
+- macOS arm64 completed in 3m08s;
+- Windows x86_64 completed in 5m22s, including the exact allowlisted strict probe.
+
+The complete logs show two suites per platform—Dev and Release—and every suite ran 10 test
+binaries with 161/161 tests passing. Each platform also printed the expected ten-line example and
+completed its Release consumer build. The Windows strict probe contained exactly the known missing
+GNU depfile warning and its strict-mode summary; the following cache-off Dev/Release gates passed.
+PR #12 remains open and merge authorization has not been granted.
 
 ## Remote Release Boundary
 

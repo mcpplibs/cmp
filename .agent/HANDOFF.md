@@ -25,7 +25,8 @@ Phase 7 是最后一个已规划的 v1 阶段，只做发布资格验收，不�
 
 Phase 7 PR #12 已获授权并创建。首轮 Windows CI 在真正编译测试前因 mcpp 已知 depfile
 降级失败；根因修正提交 `b2c0911`（`修正 Windows 发布验收门禁`）已通过 Linux、macOS、
-Windows 三平台。PR 当前保持 OPEN、CLEAN、MERGEABLE，尚未获得合并授权。
+Windows 三平台。PR 描述已获授权并修正为严格探针的真实语义，当前保持 OPEN、CLEAN、
+MERGEABLE，尚未获得合并授权。
 
 用户已授权当前持续目标内的 Git commit 与 push。PR #12 的修改、PR 合并、tag、GitHub
 Release、mcpp-index PR 和 index 合并仍必须按各自远程门禁单独授权。
@@ -70,6 +71,8 @@ Release、mcpp-index PR 和 index 合并仍必须按各自远程门禁单独授�
 - PR #12 的 `b2c0911` 三平台检查全部通过：Linux 2m53s、macOS 3m08s、Windows 5m22s。
   完整日志确认每个平台的 Dev/Release 各为 10 个二进制、161/161，example 均输出预期十行
   并完成 Release build；Windows 探针只出现已知 depfile warning 与对应 strict 汇总。
+- PR #12 描述已通过 GitHub REST 精确更新并回读比对，明确 Linux/macOS 严格门禁、Windows
+  精确严格探针与无缓存完整门禁；未修改标题、分支或合并状态。
 
 ## 已知限制
 
@@ -95,12 +98,11 @@ Release、mcpp-index PR 和 index 合并仍必须按各自远程门禁单独授�
 
 ## 剩余工作
 
-1. PR 描述仍写着三平台统一 `--strict`；按 Git 安全规则，修正 PR 描述需要用户另行授权。
-2. 合并前复核 PR #12 最新 HEAD 的三平台检查；获得单独授权后合并，同步干净 `main`，
+1. 合并前复核 PR #12 最新 HEAD 的三平台检查；获得单独授权后合并，同步干净 `main`，
    无 `--allow-dirty` 重新生成并验证正式归档。
-3. tag、GitHub Release、mcpp-index PR、index 合并和最终独立 consumer 验证按 Design 的
+2. tag、GitHub Release、mcpp-index PR、index 合并和最终独立 consumer 验证按 Design 的
    独立授权门禁逐项执行。
 
 ## 推荐下一步
 
-停在 PR #12 描述修改门禁；不自行修改或合并 PR。
+停在 PR #12 合并门禁，等待用户明确授权。

@@ -14,9 +14,9 @@ CMP 是一个具备小型协程执行核心的 C++23 模块项目。根模块导
 `std::stop_token` 的协作式取消重载；定时调度使用相对和绝对的 `steady_clock` 期限，且不创建
 定时线程。`ThreadPool::Scheduler::schedule()` 会把 continuation 显式转移到任意固定 worker，
 并采用相同的取消获胜规则。`run_blocking()` 使用调用方选择的 ThreadPool 实例执行同步工作，
-并只在到达显式返回 Scheduler 后发布结果。Phase 6B 新增拥有一个私有 driver 的不可移动
-`IoContext`，以及用于原生异步数值地址 TCP client 的 move-only `TcpStream`；所有公共结果仍
-通过调用方显式选择的 Scheduler 返回。
+并只在到达显式返回 Scheduler 后发布结果。Phase 6B/6C 新增拥有一个私有 driver 的不可移动
+`IoContext`，以及用于原生异步数值地址 TCP client/server 的 move-only `TcpStream` 和
+`TcpListener`；所有公共结果仍通过调用方显式选择的 Scheduler 返回。
 
 仓库现有内容包括：
 
@@ -103,7 +103,7 @@ Asio 类型。`compat.gtest = "1.15.2"` 是测试使用的显式命名空间开�
 ## 构建与测试
 
 `.xlings.json` 固定项目使用的 mcpp 版本。`mcpp build` 构建自动推断的库目标。
-`mcpp test` 发现十个测试文件，并为每个文件链接 gtest 入口。140 项测试同时验证 Task 所有权和
+`mcpp test` 发现十个测试文件，并为每个文件链接 gtest 入口。161 项测试同时验证 Task 所有权和
 对称转移、结构化汇合，以及根任务执行、普通与定时调度、异常传播、跨线程期限唤醒、无效
 Scheduler、取消竞态、RunLoop 复用、不会增长调用栈的重复完成，以及 TCP 生命周期和负载。
 
@@ -418,10 +418,10 @@ RunLoop 不拥有工作线程，也不提供自动线程亲和。外部 awaiter 
 - 返回调度刻意不可取消，使每个结果都到达一个执行器；
 - 这是基于线程的隔离，不表示原生非阻塞 I/O。
 
-`IoContext` 与 `TcpStream` 遵循以下契约：
+`IoContext`、`TcpStream` 与 `TcpListener` 遵循以下契约：
 
 - 一个不可移动的 context 拥有一个私有 I/O driver，并可由多个 stream 共享；
-- move-only stream 只连接数值 IPv4/IPv6 文本；不提供 DNS 或监听 API；
+- move-only stream 只连接数值 IPv4/IPv6 文本；不提供 DNS；
 - `connect()`、`read_some()` 和 `write_all()` 都是懒 Task，成功或失败只在显式返回 Scheduler
   跳转后发布；
 - read/write span 借用底层存储直到 Task 完成；一个 stream 允许一个 pending read 和一个
@@ -430,7 +430,11 @@ RunLoop 不拥有工作线程，也不提供自动线程亲和。外部 awaiter 
 - 预取消不发起 I/O，并保持 open stream 可用；已发起 write 被取消会关闭 stream；
 - `close()` 线程安全、幂等且非阻塞；当 close 或 context shutdown 赢得竞态时，已接纳操作
   恰好取消一次；
-- Phase 6A 在线程上隔离任意同步工作，Phase 6B 只提供原生异步 TCP。
+- move-only listener 懒绑定数值 IPv4/IPv6 文本，允许端口零，并由 `local_port()` 返回实际端口；
+- 同一 listener 只允许一个 pending accept；预取消或主动取消后 listener 仍可使用，listener
+  close 或 context shutdown 赢得竞态时会恰好取消一次；
+- accept 成功返回普通 `TcpStream`；关闭 listener 不会关闭已经接受的 stream；
+- Phase 6A 在线程上隔离任意同步工作，Phase 6B/6C 只提供原生异步 TCP。
 
 目前没有公共自由函数 `sync_wait`、detached 执行、独立 Timer 句柄、通用异步 I/O 层、自定义
 协程帧 allocator 或独立的阻塞线程池类型。取消仍是显式的：Scheduler、event 和 TCP 等待
@@ -450,7 +454,7 @@ CMP 名称中的 `C` 与 Go 运行时中的 `G` 相呼应，但这只说明命�
 1. TaskGroup 结果句柄及更多支持取消的原语；
 2. channel 和更多结构化唤醒路径；
 3. 代表性负载证明有必要时再加入 profiling 驱动的工作窃取；
-4. DNS、监听、TLS 或文件等其他原生 I/O 类型；
+4. DNS、TLS 或文件等其他原生 I/O 类型；
 5. 结果适配器和可选的协程帧分配策略。
 
 Task、cancellation、RunLoop、ThreadPool、blocking offload、TCP、`when_all`、TaskGroup、
@@ -470,14 +474,15 @@ cd examples/basic
 mcpp run
 ```
 
-预期结果是库构建成功、十个二进制中的 140 项测试全部通过，并且示例依次输出
+预期结果是库构建成功、十个二进制中的 161 项测试全部通过，并且示例依次输出
 `Coroutine result: 42`、`Concurrent result: 42`、`Worker pool result: 42`、
 `Blocking result: 42`、`Task group result: 42`、`Recursive group result: 3`、`Event signalled`、
 `Reusable event cycles: 2`、
 `Mutex result: 42` 和 `Coroutine cancelled` 后以状态 0 退出。测试保留原有高容量栈安全检查，
 并增加两万次 TaskGroup 递归接纳、十万次预取消就绪调度、五万个 manual event 等待者、两万次
-嵌套可复用事件信号、set/cancel 竞态、排队阻塞取消、5,000 个并发阻塞 offload、32 客户端
-TCP 负载，以及重复的 TCP close/stop completion 竞态；重点竞态套件已连续执行多轮 Release 测试。
+嵌套可复用事件信号、set/cancel 竞态、排队阻塞取消、5,000 个并发阻塞 offload、各 32 客户端
+的 stream/listener 负载、重复的 stream close/stop 竞态，以及 100 次 close/accept 与 500 次
+stop/accept 竞态门禁；重点竞态套件已连续执行多轮 Release 测试。
 计算、临时文件和回环网络的成功/失败计数及吞吐记录在
 [v1 可开发性压测](benchmarks/2026-08-29-cmp-v1-readiness.md)。ThreadPool 的计数、并发和五轮
 Release 数据记录在[线程池压测](benchmarks/2026-08-29-cmp-thread-pool.md)。当前 Windows LLVM 工具链不会

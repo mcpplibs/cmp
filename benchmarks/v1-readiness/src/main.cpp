@@ -17,6 +17,7 @@ using mcpplibs::cmp::RunLoop;
 using mcpplibs::cmp::IoContext;
 using mcpplibs::cmp::Task;
 using mcpplibs::cmp::TaskGroup;
+using mcpplibs::cmp::TcpListener;
 using mcpplibs::cmp::TcpStream;
 using mcpplibs::cmp::ThreadPool;
 using mcpplibs::cmp::run_blocking;
@@ -166,58 +167,33 @@ public:
     return { std::move(socket), ntohs(address.sin_port) };
 }
 
-void send_all(int socket, std::span<const std::byte> data) {
-    std::size_t offset { 0 };
-
-    while (offset < data.size()) {
-        const auto sent = ::send(
-            socket,
-            data.data() + offset,
-            data.size() - offset,
-            0);
-        if (sent <= 0) {
-            throw_socket_error("send");
-        }
-        offset += static_cast<std::size_t>(sent);
-    }
-}
-
-void receive_exactly(int socket, std::span<std::byte> data) {
-    std::size_t offset { 0 };
-
-    while (offset < data.size()) {
-        const auto received = ::recv(
-            socket,
-            data.data() + offset,
-            data.size() - offset,
-            0);
-        if (received <= 0) {
-            throw_socket_error("recv");
-        }
-        offset += static_cast<std::size_t>(received);
-    }
-}
-
-void run_echo_server(
-    int listener,
+Task<void> run_echo_server(
+    TcpListener& listener,
+    Scheduler scheduler,
     const std::array<std::byte, NETWORK_PAYLOAD_SIZE>& payload) {
-    const int acceptedHandle = ::accept(listener, nullptr, nullptr);
-
-    if (acceptedHandle < 0) {
-        throw_socket_error("accept");
-    }
-
-    Socket accepted { acceptedHandle };
+    auto accepted = co_await listener.accept(scheduler);
     std::array<std::byte, NETWORK_PAYLOAD_SIZE> request {};
 
     for (int round { 0 }; round < NETWORK_ROUNDS; ++round) {
-        receive_exactly(accepted.get(), request);
+        std::size_t received {};
+
+        while (received < request.size()) {
+            const auto size = co_await accepted.read_some(
+                scheduler,
+                std::span { request }.subspan(received));
+
+            if (size == 0) {
+                throw std::runtime_error { "unexpected client EOF" };
+            }
+
+            received += size;
+        }
 
         if (!std::ranges::equal(request, payload)) {
             throw std::runtime_error { "server payload mismatch" };
         }
 
-        send_all(accepted.get(), payload);
+        co_await accepted.write_all(scheduler, payload);
     }
 }
 
@@ -328,24 +304,21 @@ Task<void> run_file_io(
 
 Task<void> run_network_worker(
     IoContext& ioContext,
-    BlockingScheduler blockingWorkers,
     Scheduler scheduler,
     std::array<std::byte, NETWORK_PAYLOAD_SIZE> payload,
     Counters& counters) {
-    auto [listener, port] = bind_loopback_socket();
-
-    if (::listen(listener.get(), 1) != 0) {
-        throw_socket_error("listen");
-    }
-
-    // 服务端继续在线程池阻塞；客户端由 IoContext 原生异步驱动。
-    TaskGroup serverGroup {};
-    serverGroup.spawn(run_blocking(
-        blockingWorkers,
+    auto listener = co_await TcpListener::bind(
+        ioContext,
         scheduler,
-        [listenerHandle = listener.get(), payload] {
-            run_echo_server(listenerHandle, payload);
-        }));
+        "127.0.0.1",
+        0);
+
+    // Phase 6C 服务端与客户端共用 IoContext，均不占用 blocking worker。
+    TaskGroup serverGroup {};
+    serverGroup.spawn(run_echo_server(
+        listener,
+        scheduler,
+        payload));
 
     int completed {};
 
@@ -354,7 +327,7 @@ Task<void> run_network_worker(
             ioContext,
             scheduler,
             "127.0.0.1",
-            port);
+            listener.local_port());
         std::array<std::byte, NETWORK_PAYLOAD_SIZE> response {};
 
         for (; completed < NETWORK_ROUNDS; ++completed) {
@@ -382,7 +355,7 @@ Task<void> run_network_worker(
     } catch (...) {
         counters.unexpectedFailures_.fetch_add(
             NETWORK_ROUNDS - completed);
-        static_cast<void>(::shutdown(listener.get(), SHUT_RDWR));
+        listener.close();
     }
 
     bool serverFailed {};
@@ -397,6 +370,8 @@ Task<void> run_network_worker(
         counters.successes_.fetch_sub(1);
         counters.unexpectedFailures_.fetch_add(1);
     }
+
+    listener.close();
 
     auto [reservation, failurePort] = bind_loopback_socket();
 
@@ -423,7 +398,6 @@ Task<void> run_network_worker(
 
 Task<void> run_network_io(
     IoContext& ioContext,
-    BlockingScheduler blockingWorkers,
     Scheduler scheduler,
     Counters& counters) {
     std::array<std::byte, NETWORK_PAYLOAD_SIZE> payload {};
@@ -433,7 +407,6 @@ Task<void> run_network_io(
     for (int remaining { NETWORK_WORKERS }; remaining > 0; --remaining) {
         group.spawn(run_network_worker(
             ioContext,
-            blockingWorkers,
             scheduler,
             payload,
             counters));
@@ -521,7 +494,6 @@ int main() {
         [&](Scheduler scheduler, Counters& counters) {
             return run_network_io(
                 ioContext,
-                blockingWorkers.get_scheduler(),
                 scheduler,
                 counters);
         }));

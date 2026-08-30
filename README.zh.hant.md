@@ -21,15 +21,16 @@
 > CMP 已提供延遲啟動、單一消費者的 `Task<T>` / `Task<void>`、支援變參和 vector 的結構化
 > `when_all()`、eager 結構化 `TaskGroup`、一次性與可複用事件、RAII `AsyncMutex`，以及在呼叫
 > 執行緒運行、支援明確排程和單調時鐘定時排程的 `RunLoop`，以及固定大小的 CPU
-> `ThreadPool`。Phase 6B 新增明確的 `IoContext` 和 move-only `TcpStream`，用於原生非同步的
-> 數值位址 TCP client。`run_blocking()` 可在專用的 pool 實例上執行同步 callable，並透過
+> `ThreadPool`。Phase 6B/6C 新增明確的 `IoContext`、move-only `TcpStream` 和 move-only
+> `TcpListener`，用於原生非同步的數值位址 TCP client 與 server。`run_blocking()` 可在專用的
+> pool 實例上執行同步 callable，並透過
 > 明確的返回 Scheduler 交付結果。兩種執行器的就緒排程、定時等待、可複用事件等待、TaskGroup
 > 子任務和排隊中的阻塞 offload 可明確使用基於 `std::stop_token` 的協作式取消；TCP 操作採用
 > 相同 token 模型。detached 執行和其他原生 I/O 類型尚未實作。
 
 CMP 計畫以標準無堆疊 C++ 協程建構現代協程執行期與函式庫。明確的 `co_await` 模型現已
 涵蓋固定與增量結構化並行、一次性事件通知、呼叫執行緒與多 worker 排程、單調時鐘計時器、
-可取消等待和阻塞工作的結構化隔離，以及一個可攜式原生非同步 TCP client 切片。
+可取消等待和阻塞工作的結構化隔離，以及可攜式原生非同步 TCP client 與 listener 切片。
 
 ## 為什麼叫 CMP？
 
@@ -55,7 +56,7 @@ C++ 標準協程是語言機制，不是完整執行期。因此 CMP 不會宣�
 - task 會隱式遷移、work stealing 已啟用，或所有 I/O 類型都已非同步化。
 
 這些能力必須分別設計和驗證。CMP 目前透過明確的專用 `ThreadPool` 實例和
-`run_blocking()` 隔離同步工作。Phase 6B 已提供原生非同步 TCP client；DNS、監聽 socket、
+`run_blocking()` 隔離同步工作。Phase 6B/6C 已提供原生非同步 TCP client 與 listener；DNS、
 TLS、檔案 I/O 和協作式安全點仍需分別設計。
 
 ## 快速開始
@@ -97,6 +98,7 @@ using mcpplibs::cmp::OneShotEvent;
 using mcpplibs::cmp::TaskGroup;
 using mcpplibs::cmp::ThreadPool;
 using mcpplibs::cmp::IoContext;
+using mcpplibs::cmp::TcpListener;
 using mcpplibs::cmp::TcpStream;
 using mcpplibs::cmp::run_blocking;
 using mcpplibs::cmp::when_all;
@@ -324,6 +326,16 @@ Task<std::size_t> exchange(
     co_await stream.write_all(caller, request, token);
     co_return co_await stream.read_some(caller, reply, token);
 }
+
+Task<TcpStream> accept_one(
+    IoContext& io,
+    RunLoop::Scheduler caller,
+    std::uint16_t port,
+    std::stop_token token = {}) {
+    auto listener = co_await TcpListener::bind(
+        io, caller, "127.0.0.1", port, token);
+    co_return co_await listener.accept(caller, token);
+}
 ```
 
 一個不可移動的 `IoContext` 可供多個 stream 共用，並擁有一個私有 I/O driver。`TcpStream` 只能
@@ -331,8 +343,11 @@ Task<std::size_t> exchange(
 保持到返回的 Task 完成。每種成功或錯誤都會嘗試明確返回 Scheduler。一個 read 和一個 write
 可以並存；同方向第二個操作拋出 `std::logic_error`。預取消不會關閉仍可用的 stream，而已發起
 的 `write_all()` 被取消後會關閉 stream。`close()` 執行緒安全、冪等；當 close 獲勝時，已接納
-操作恰好一次以 `OperationCancelled` 完成。Phase 6A 在執行緒池上隔離任意同步呼叫；Phase 6B
-只提供原生非同步 TCP，不是通用非同步 I/O 層。
+操作恰好一次以 `OperationCancelled` 完成。`TcpListener::bind()` 完成數值位址的
+bind-and-listen，允許連接埠零，並由 `local_port()` 返回實際連接埠。同一 listener 只允許一個
+pending accept；預取消或主動取消 accept 後 listener 仍可使用，close 會取消 pending accept。
+已接受 stream 與 listener 生命週期獨立。Phase 6A 在執行緒池上隔離任意同步呼叫；Phase 6B/6C
+提供原生非同步 TCP，不是通用非同步 I/O 層。
 
 RunLoop 不是背景執行緒，也不會把阻塞程式碼自動變成非同步程式碼。如果 Task 暫停後沒有
 安排未來的恢復動作，`run()` 可能一直等待。CMP 不提供隱式執行緒親和：外部 awaiter 在其他
@@ -350,7 +365,7 @@ RunLoop 不是背景執行緒，也不會把阻塞程式碼自動變成非同步
 ├── src/run_loop.cppm              # RunLoop 與 Scheduler 分割區
 ├── src/thread_pool.cppm            # 固定大小的 CPU worker 排程器
 ├── src/blocking.cppm               # 結構化阻塞呼叫 offload
-├── src/tcp.cppm                    # 原生非同步 TCP client 與 I/O context
+├── src/tcp.cppm                    # 原生非同步 TCP client/server 與 I/O context
 ├── src/when_all.cppm              # 結構化並行 Task 匯合
 ├── src/task_group.cppm             # eager 可變結構化 Task 作用域
 ├── src/one_shot_event.cppm         # 無分配一次性通知
@@ -392,7 +407,7 @@ CI 在 Linux、macOS 和 Windows 上執行等價的建構、測試與獨立範�
 
 CMP 目前不追蹤 `mcpp.lock`，`.gitignore` 明確執行這項儲存庫約定。執行期相依放在
 `[dependencies]`，gtest 明確宣告在 `[dev-dependencies.compat]` 中。
-目前本機套件包含 10 個測試二進位檔、140 項測試。僅用於 POSIX 的 Release 壓測 consumer 及其
+目前本機套件包含 10 個測試二進位檔、161 項測試。僅用於 POSIX 的 Release 壓測 consumer 及其
 成功/失敗資料記錄在 [v1 可開發性壓測](docs/benchmarks/2026-08-29-cmp-v1-readiness.md)。
 多 worker 正確性和效能資料記錄在[執行緒池壓測](docs/benchmarks/2026-08-29-cmp-thread-pool.md)。
 
@@ -406,8 +421,8 @@ CMP 目前不追蹤 `mcpp.lock`，`.gitignore` 明確執行這項儲存庫約定
 4. 單調時鐘 Timer v1、可取消就緒/定時等待、變參/vector 匯合、靜止點 TaskGroup、
    OneShotEvent、AsyncManualResetEvent 和 AsyncMutex——已實作並完成壓力驗證；
 5. 固定大小的多 worker 排程——已實作並完成壓測；work stealing 仍需 profiling 證據；
-6. 結構化阻塞 offload 與數值位址原生非同步 TCP client——已實作，並由 PR #10 的 Linux、
-   macOS 和 Windows CI 驗證。
+6. 結構化阻塞 offload 與數值位址原生非同步 TCP client/listener——均已實作；client 由
+   PR #10、listener 由 PR #11 在 Linux、macOS 和 Windows 上完成 CI 驗證。
 
 剩餘順序只是方向，不代表列出的能力已經實作。
 

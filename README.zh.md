@@ -21,7 +21,8 @@
 > CMP 已提供懒启动、单消费者的 `Task<T>` / `Task<void>`、支持变参和 vector 的结构化
 > `when_all()`、eager 结构化 `TaskGroup`、一次性与可复用事件、RAII `AsyncMutex`，以及在调用
 > 线程运行、支持显式调度和单调时钟定时调度的 `RunLoop`，以及固定大小的 CPU `ThreadPool`。
-> Phase 6B 新增显式 `IoContext` 和 move-only `TcpStream`，用于原生异步的数值地址 TCP client。
+> Phase 6B/6C 新增显式 `IoContext`、move-only `TcpStream` 和 move-only `TcpListener`，用于原生
+> 异步的数值地址 TCP client 与 server。
 > `run_blocking()` 可在专用的 pool 实例上执行同步 callable，并通过显式的返回 Scheduler
 > 交付结果。两种执行器的就绪调度、定时等待、可复用事件等待、TaskGroup 子任务和排队中的
 > 阻塞 offload 可显式使用基于 `std::stop_token` 的协作式取消；TCP 操作采用同一 token 模型。
@@ -29,7 +30,7 @@
 
 CMP 计划基于标准无栈 C++ 协程构建现代协程运行时和库。显式 `co_await` 模型现已覆盖固定与
 增量结构化并发、一次性事件通知、调用线程与多 worker 调度、单调时钟定时器、可取消等待和
-阻塞工作的结构化隔离，以及一个可移植的原生异步 TCP client 切片。
+阻塞工作的结构化隔离，以及可移植的原生异步 TCP client 与 listener 切片。
 
 ## 为什么叫 CMP？
 
@@ -55,7 +56,7 @@ C++ 标准协程是语言机制，不是完整运行时。因此 CMP 不会宣�
 - task 会隐式迁移、work stealing 已启用，或所有 I/O 类型都已异步化。
 
 这些能力必须分别设计和验证。CMP 目前通过显式的专用 `ThreadPool` 实例和
-`run_blocking()` 隔离同步工作。Phase 6B 已提供原生异步 TCP client；DNS、监听 socket、TLS、
+`run_blocking()` 隔离同步工作。Phase 6B/6C 已提供原生异步 TCP client 与 listener；DNS、TLS、
 文件 I/O 和协作式安全点仍需分别设计。
 
 ## 快速开始
@@ -97,6 +98,7 @@ using mcpplibs::cmp::OneShotEvent;
 using mcpplibs::cmp::TaskGroup;
 using mcpplibs::cmp::ThreadPool;
 using mcpplibs::cmp::IoContext;
+using mcpplibs::cmp::TcpListener;
 using mcpplibs::cmp::TcpStream;
 using mcpplibs::cmp::run_blocking;
 using mcpplibs::cmp::when_all;
@@ -324,6 +326,16 @@ Task<std::size_t> exchange(
     co_await stream.write_all(caller, request, token);
     co_return co_await stream.read_some(caller, reply, token);
 }
+
+Task<TcpStream> accept_one(
+    IoContext& io,
+    RunLoop::Scheduler caller,
+    std::uint16_t port,
+    std::stop_token token = {}) {
+    auto listener = co_await TcpListener::bind(
+        io, caller, "127.0.0.1", port, token);
+    co_return co_await listener.accept(caller, token);
+}
 ```
 
 一个不可移动的 `IoContext` 可供多个 stream 共享，并拥有一个私有 I/O driver。`TcpStream` 只能
@@ -331,8 +343,11 @@ Task<std::size_t> exchange(
 保持到返回的 Task 完成。每种成功或错误都会尝试显式返回 Scheduler。一个 read 和一个 write
 可以并存；同方向第二个操作抛出 `std::logic_error`。预取消不会关闭仍可用的 stream，而已发起
 的 `write_all()` 被取消后会关闭 stream。`close()` 线程安全、幂等；当 close 获胜时，已接纳
-操作恰好一次以 `OperationCancelled` 完成。Phase 6A 在线程池上隔离任意同步调用；Phase 6B
-只提供原生异步 TCP，不是通用异步 I/O 层。
+操作恰好一次以 `OperationCancelled` 完成。`TcpListener::bind()` 完成数值地址的 bind-and-listen，
+允许端口零，并由 `local_port()` 返回实际端口。同一 listener 只允许一个 pending accept；预取消
+或主动取消 accept 后 listener 仍可使用，close 会取消 pending accept。已接受 stream 与 listener
+生命周期独立。Phase 6A 在线程池上隔离任意同步调用；Phase 6B/6C 提供原生异步 TCP，不是通用
+异步 I/O 层。
 
 RunLoop 不是后台线程，也不会把阻塞代码自动变成异步代码。如果 Task 挂起后没有安排未来的
 恢复动作，`run()` 可能一直等待。CMP 不提供隐式线程亲和：外部 awaiter 在其他线程恢复协程
@@ -350,7 +365,7 @@ RunLoop 不是后台线程，也不会把阻塞代码自动变成异步代码。
 ├── src/run_loop.cppm         # RunLoop 与 Scheduler 分区
 ├── src/thread_pool.cppm      # 固定大小的 CPU worker 调度器
 ├── src/blocking.cppm         # 结构化阻塞调用 offload
-├── src/tcp.cppm              # 原生异步 TCP client 与 I/O context
+├── src/tcp.cppm              # 原生异步 TCP client/server 与 I/O context
 ├── src/when_all.cppm         # 结构化并发 Task 汇合
 ├── src/task_group.cppm       # eager 可变结构化 Task 作用域
 ├── src/one_shot_event.cppm   # 无分配一次性通知
@@ -392,7 +407,7 @@ CI 在 Linux、macOS 和 Windows 上执行等价的构建、测试和独立示�
 
 CMP 当前不跟踪 `mcpp.lock`，`.gitignore` 明确执行这一仓库约定。运行时依赖放在
 `[dependencies]`，gtest 明确声明在 `[dev-dependencies.compat]` 中。
-当前本地套件包含 10 个测试二进制、140 项测试。仅用于 POSIX 的 Release 压测 consumer 及其
+当前本地套件包含 10 个测试二进制、161 项测试。仅用于 POSIX 的 Release 压测 consumer 及其
 成功/失败数据记录在 [v1 可开发性压测](docs/benchmarks/2026-08-29-cmp-v1-readiness.md)。
 多 worker 正确性和性能数据记录在[线程池压测](docs/benchmarks/2026-08-29-cmp-thread-pool.md)。
 
@@ -406,8 +421,8 @@ CMP 当前不跟踪 `mcpp.lock`，`.gitignore` 明确执行这一仓库约定。
 4. 单调时钟 Timer v1、可取消就绪/定时等待、变参/vector 汇合、静止点 TaskGroup、
    OneShotEvent、AsyncManualResetEvent 和 AsyncMutex——已实现并完成压力验证；
 5. 固定大小的多 worker 调度——已实现并完成压测；work stealing 仍需 profiling 证据；
-6. 结构化阻塞 offload 与数值地址原生异步 TCP client——已实现，并由 PR #10 的 Linux、
-   macOS 和 Windows CI 验证。
+6. 结构化阻塞 offload 与数值地址原生异步 TCP client/listener——均已实现；client 由
+   PR #10、listener 由 PR #11 在 Linux、macOS 和 Windows 上完成 CI 验证。
 
 剩余顺序只是方向，不代表列出的能力已经实现。
 

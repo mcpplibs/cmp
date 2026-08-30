@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-30
 **Design:** `docs/superpowers/specs/2026-08-30-cmp-phase6c-tcp-server-v1-design.md`
-**Status:** Complete locally; cross-platform CI pending
+**Status:** Complete; local and Linux/macOS/Windows CI verified in PR #11
 **Baseline:** `feature/phase6c-tcp-server-v1` from `main` commit `9492075`; 140/140 tests
 
 ## Execution Rule
@@ -181,7 +181,9 @@ example passed. Five final readiness rounds reported exact
 success/expected failure counts and zero unexpected failures; native async TCP client/server
 median throughput was 8,976.6 ops/s.
 
-No commit, push, PR, merge, or remote CI action is included in this local implementation.
+Remote completion: implementation commit `e0248ca` and the reviewed release-plan companion were
+pushed on `feature/phase6c-tcp-server-v1`. PR #11 then passed Linux x86_64 in 2m43s, macOS arm64 in
+2m45s, and Windows x86_64 in 2m49s. Merge remains a separately authorized operation.
 
 ## Scope Guard
 

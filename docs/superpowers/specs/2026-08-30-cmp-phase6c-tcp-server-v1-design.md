@@ -1,7 +1,7 @@
 # CMP Phase 6C TCP Server v1 Design
 
 **Date:** 2026-08-30
-**Status:** Implemented and verified locally; cross-platform CI pending
+**Status:** Implemented; local and Linux/macOS/Windows CI verified in PR #11
 **Baseline:** `main` at PR #10 squash commit `9492075`; 140/140 Dev and Release tests
 
 ## Purpose
@@ -272,7 +272,7 @@ not access the public internet, depend on fixed sleeps, or assert platform-speci
 
 ## Acceptance Criteria
 
-Phase 6C v1 is locally complete when:
+Phase 6C v1 is complete when:
 
 1. a consumer imports only `mcpplibs.cmp` and uses the shown bind/accept path;
 2. no public Asio type leaks through CMP;
@@ -285,8 +285,7 @@ Phase 6C v1 is locally complete when:
 8. the readiness benchmark reports zero unexpected failures in five Release rounds;
 9. English, Simplified Chinese, and Traditional Chinese docs state the same boundary.
 
-Linux, macOS, and Windows CI remain the final cross-platform gate and can be recorded only after a
-separately authorized push/PR workflow.
+PR #11 passed the final Linux x86_64, macOS arm64, and Windows x86_64 cross-platform gate.
 
 ## Self-review Corrections
 
@@ -322,7 +321,10 @@ The implementation review tightened four boundaries before coding:
 - Five final Release readiness rounds kept all compute, file, and native async TCP client/server
   hard counts exact with zero unexpected failures; network median was 2,239.147 ms / 8,976.6 ops/s.
 
-Linux, macOS, and Windows CI remain unclaimed until a separately authorized push and PR run.
+## Remote Completion Evidence
+
+PR #11 ran the existing pinned-toolchain build, ten test binaries, and standalone example on Linux
+x86_64, macOS arm64, and Windows x86_64. All three checks passed on the implementation head.
 
 ## Deliberately Excluded
 

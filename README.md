@@ -447,9 +447,8 @@ Runtime work is split into independently reviewable phases:
    OneShotEvent, AsyncManualResetEvent, and AsyncMutex — implemented and pressure-tested;
 5. fixed-size multi-worker scheduling — implemented and benchmarked; work stealing remains gated
    by profiling evidence;
-6. structured blocking offload and native async numeric-address TCP client — implemented and
-   verified by Linux, macOS, and Windows CI in PR #10; the TCP listener slice is implemented
-   locally and awaits its cross-platform CI gate.
+6. structured blocking offload and native async numeric-address TCP client/listener — implemented;
+   the client was verified by PR #10 and the listener by PR #11 on Linux, macOS, and Windows.
 
 The remaining order is directional, not a promise that a listed feature is already implemented.
 

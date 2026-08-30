@@ -27,8 +27,8 @@ Phase 7 是最后一个已规划的 v1 阶段，只做发布验收，不增加�
 已完成复核，并已执行不依赖远程权限的早期包转换预检；正式实施仍等待 Phase 6C 合并后
 切换到独立分支。
 
-用户已授权当前持续目标内的 Git commit 与 push。尚未创建 PR，也未触发 Phase 6C 的
-远程 CI；PR 创建和合并仍需用户分别明确授权。
+用户已授权当前持续目标内的 Git commit 与 push。Phase 6C PR #11 已创建，Linux、macOS、
+Windows CI 均通过；合并仍需用户另行明确授权。
 
 ## 已完成工作
 
@@ -76,7 +76,7 @@ Phase 7 是最后一个已规划的 v1 阶段，只做发布验收，不增加�
   到 Phase 4–7 及 CI 冷缓存修复，共有 16 组逻辑 Design/Plan；已逐一核对，全部成对存在。
 - Phase 4 已完成 v1 基础契约和 readiness；Phase 5 已完成 ThreadPool；Phase 6A 已完成
   blocking offload；Phase 6B 已完成 TCP client，并由 PR #10 三平台验证。
-- Phase 6C 是唯一尚未完成远程集成的运行时阶段；本地 TCP server 实现和 161 项门禁已完成。
+- Phase 6C TCP server 的本地实现、161 项门禁和 PR #11 三平台 CI 均已完成，只待授权合并。
 - Phase 7 是最后一个计划阶段，仅做发布资格、三平台双配置、干净归档、GitHub Release 和
   mcpp-index 验收。没有遗漏的已规划 Phase 8；未来能力必须由真实需求启动独立 Design。
 
@@ -152,7 +152,8 @@ Phase 7 是最后一个已规划的 v1 阶段，只做发布验收，不增加�
 - 早期源码归档不含 `TcpListener`，确认 `--allow-dirty` 未装入 Phase 6C。归档对应的
   Phase 6B 基线使用已安装的 mcpp `2026.8.28.1` 在隔离目录完成 Dev/Release 构建，
   两套均为 10 个测试二进制、140/140 通过；归档内 example 的运行和 Release 构建也通过。
-- Linux、macOS、Windows 的 Phase 6C CI 尚未运行，不声明跨平台通过。
+- PR #11 的 Linux x86_64、macOS arm64、Windows x86_64 检查均通过；首轮耗时分别为
+  2m43s、2m45s、2m49s。
 
 ## 已知问题 / 风险
 
@@ -177,13 +178,11 @@ Phase 7 是最后一个已规划的 v1 阶段，只做发布验收，不增加�
 
 ## 剩余工作
 
-1. 用户审查已推送的 Phase 6C 及 Phase 7 Design/Plan 差异，并明确授权后再创建 PR。
-2. Phase 6C PR 以 Linux x86_64、macOS arm64、Windows x86_64 CI 作为最终跨平台门禁，
-   合并也需要单独授权。
-3. 合并后同步 `main`、新建 Phase 7 分支，按 Design/Plan 加强三平台 Dev/Release CI，
+1. 用户审查三平台全绿的 PR #11，并明确授权后再合并。
+2. 合并后同步 `main`、新建 Phase 7 分支，按 Design/Plan 加强三平台 Dev/Release CI，
    并从干净候选重跑 161 项、example、readiness、归档及 Form A 验收。
-4. tag、GitHub Release、mcpp-index PR 与 index 合并均是独立远程操作，逐项等待授权。
+3. tag、GitHub Release、mcpp-index PR 与 index 合并均是独立远程操作，逐项等待授权。
 
 ## 推荐下一步
 
-由用户审查分支并确认是否授权创建 Phase 6C PR；在此之前不执行任何 `gh` 写操作。
+由用户审查 PR #11 并确认是否授权合并；在此之前不执行 merge。

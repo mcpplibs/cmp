@@ -463,7 +463,7 @@ OneShotEvent、AsyncManualResetEvent 与 AsyncMutex 已经形成真实的公共�
 
 ## 验证
 
-在仓库根目录执行：
+在 Linux 或 macOS 的仓库根目录执行：
 
 ```text
 mcpp build --profile dev --strict --cache=off
@@ -472,9 +472,11 @@ mcpp build --profile release --strict --cache=off
 mcpp test --profile release --strict --cache=off
 cd examples/basic
 mcpp run
+mcpp build --profile release --strict --cache=off
 ```
 
-预期结果是库构建成功、十个二进制中的 161 项测试全部通过，并且示例依次输出
+预期结果是库和示例的 Dev/Release 构建成功、十个二进制中的 161 项测试全部通过，并且
+示例依次输出
 `Coroutine result: 42`、`Concurrent result: 42`、`Worker pool result: 42`、
 `Blocking result: 42`、`Task group result: 42`、`Recursive group result: 3`、`Event signalled`、
 `Reusable event cycles: 2`、
@@ -485,6 +487,7 @@ mcpp run
 stop/accept 竞态门禁；重点竞态套件已连续执行多轮 Release 测试。
 计算、临时文件和回环网络的成功/失败计数及吞吐记录在
 [v1 可开发性压测](benchmarks/2026-08-29-cmp-v1-readiness.md)。ThreadPool 的计数、并发和五轮
-Release 数据记录在[线程池压测](benchmarks/2026-08-29-cmp-thread-pool.md)。当前 Windows LLVM 工具链不会
-生成 GNU depfile；如果模块接口包含的文件发生变化，增量构建可能复用旧的 BMI 或目标文件。
-完整复验时使用 `--cache=off`。
+Release 数据记录在[线程池压测](benchmarks/2026-08-29-cmp-thread-pool.md)。Windows 应使用
+workflow 中的严格探针，并在实际无缓存门禁中去掉 `--strict`。当前 Windows LLVM 工具链
+不会生成 GNU depfile；其 CI 严格探针只放行这一条已知降级，并拒绝其他 warning 或 error。
+实际 Windows 门禁使用 `--cache=off`，完整重建不会复用旧的 BMI 或目标文件。

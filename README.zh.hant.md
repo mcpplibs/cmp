@@ -392,18 +392,24 @@ RunLoop 不是背景執行緒，也不會把阻塞程式碼自動變成非同步
 
 ## 開發與驗證
 
-本機驗證路徑：
+Linux 和 macOS 的本機驗證路徑：
 
 ```bash
 mcpp build --profile dev --strict --cache=off
 mcpp test --profile dev --strict --cache=off
 mcpp build --profile release --strict --cache=off
 mcpp test --profile release --strict --cache=off
-cd examples/basic && mcpp run
+cd examples/basic
+mcpp run
+mcpp build --profile release --strict --cache=off
 ```
 
-CI 在 Linux、macOS 和 Windows 上執行等價的建構、測試與獨立範例流程。mcpp 版本由
-`.xlings.json` 固定，不應依賴無關的全域 mcpp 安裝。
+Windows 應先使用 workflow 中的嚴格探針，並在實際無快取門禁中移除 `--strict`，原因見下文。
+
+CI 在三個平台都執行無快取 Dev/Release 函式庫門禁、獨立範例及其 Release 建構；Linux 和
+macOS 保持嚴格模式。mcpp `2026.8.28.1` 在 Windows 上先執行嚴格探針，只放行已知的 LLVM
+depfile 降級，再移除 `--strict` 執行無快取門禁；完整重建使這項增量限制無法沿用舊目的檔。
+mcpp 版本由 `.xlings.json` 固定，不應依賴無關的全域安裝。
 
 CMP 目前不追蹤 `mcpp.lock`，`.gitignore` 明確執行這項儲存庫約定。執行期相依放在
 `[dependencies]`，gtest 明確宣告在 `[dev-dependencies.compat]` 中。

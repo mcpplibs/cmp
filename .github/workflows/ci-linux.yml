@@ -51,13 +51,15 @@ jobs:
           xlings install -y
           mcpp --version
 
-      - name: Build library
-        run: mcpp build
+      - name: Qualify library
+        run: |
+          mcpp build --profile dev --strict --cache=off
+          mcpp test --profile dev --strict --cache=off
+          mcpp build --profile release --strict --cache=off
+          mcpp test --profile release --strict --cache=off
 
-      - name: Run tests
-        run: mcpp test
-
-      - name: Run example
+      - name: Qualify example
         run: |
           cd examples/basic
           mcpp run
+          mcpp build --profile release --strict --cache=off

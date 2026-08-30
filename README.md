@@ -414,17 +414,25 @@ after CMP has a stable runtime API worth demonstrating.
 
 ## Development
 
-The local verification path is:
+On Linux and macOS, the local verification path is:
 
 ```bash
 mcpp build --profile dev --strict --cache=off
 mcpp test --profile dev --strict --cache=off
 mcpp build --profile release --strict --cache=off
 mcpp test --profile release --strict --cache=off
-cd examples/basic && mcpp run
+cd examples/basic
+mcpp run
+mcpp build --profile release --strict --cache=off
 ```
 
-CI runs the equivalent build, test, and standalone example flow on Linux, macOS, and Windows.
+On Windows, use the workflow's strict probe and remove `--strict` from the actual cache-off gates,
+as described below.
+
+CI runs cache-off Dev/Release library gates, the standalone example, and its Release build on all
+three platforms. Linux and macOS remain strict. With mcpp `2026.8.28.1`, Windows first uses a
+strict probe that allows only the known LLVM depfile degradation, then performs the cache-off gates
+without `--strict`; full rebuilds prevent that incremental limitation from reusing stale objects.
 The mcpp version is pinned by `.xlings.json`; contributors should not rely on an unrelated
 global mcpp installation.
 
